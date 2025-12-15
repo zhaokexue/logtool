@@ -1,0 +1,65 @@
+################################
+# Python virtual environments
+################################
+.venv/
+venv/
+ENV/
+env/
+
+################################
+# Python cache & compiled files
+################################
+__pycache__/
+*.py[cod]
+*$py.class
+
+################################
+# Python packaging / build
+################################
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+################################
+# C / C++ build artifacts
+################################
+*.o
+*.a
+*.so
+*.out
+*.exe
+
+################################
+# CMake / Make
+################################
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+################################
+# Logs & runtime data
+################################
+*.log
+logs/
+data/
+cache/
+assets/
+
+################################
+# Editor / IDE
+################################
+.vscode/
+.idea/
+*.swp
+*.swo
+
+################################
+# OS files
+################################
+.DS_Store
+Thumbs.db
+

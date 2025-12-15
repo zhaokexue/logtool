@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Log Viewer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="row">
+    <div class="panel">
+      <h2>Time</h2>
+      <input id="slider" type="range" min="0" max="1000" value="0" step="1">
+      <div class="kv">
+        <div>t(s): <span id="tsec">0.00</span></div>
+        <div>pose_ts: <span id="pose_ts">-</span></div>
+        <div>scan_ts: <span id="scan_ts">-</span></div>
+      </div>
+      <div class="btnrow">
+        <button id="play">Play</button>
+        <button id="reset_traj">Reset Traj</button>
+      </div>
+      <div class="kv">
+        <div>pose: <span id="pose_txt">-</span></div>
+      </div>
+    </div>
+
+    <div class="view">
+      <h2>Local Laser Point Cloud</h2>
+      <canvas id="cloud" width="700" height="700"></canvas>
+      <div class="hint">Red: hits, Blue: robot origin, X-forward, Y-left</div>
+    </div>
+
+    <div class="view">
+      <h2>Pose Trajectory (Incremental while Playing)</h2>
+      <canvas id="traj" width="700" height="700"></canvas>
+      <div class="hint">Green polyline is appended during Play; Dragging does not append.</div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
+
