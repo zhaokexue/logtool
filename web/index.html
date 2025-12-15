@@ -2,42 +2,140 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Log Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>log_web_viewer</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div class="row">
-    <div class="panel">
-      <h2>Time</h2>
-      <input id="slider" type="range" min="0" max="1000" value="0" step="1">
-      <div class="kv">
-        <div>t(s): <span id="tsec">0.00</span></div>
-        <div>pose_ts: <span id="pose_ts">-</span></div>
-        <div>scan_ts: <span id="scan_ts">-</span></div>
+  <div class="app">
+    <!-- Top control bar -->
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <button id="btnPlay" class="btn primary">播放</button>
+        <button id="btnRecord" class="btn">录制</button>
+        <button id="btnResetTraj" class="btn">轨迹重置</button>
       </div>
-      <div class="btnrow">
-        <button id="play">Play</button>
-        <button id="reset_traj">Reset Traj</button>
+
+      <div class="toolbar-mid">
+        <div class="field">
+          <div class="label">时间</div>
+          <div class="value" id="txtTime">-</div>
+        </div>
+        <div class="field">
+          <div class="label">状态</div>
+          <div class="value" id="txtState">-</div>
+        </div>
       </div>
-      <div class="kv">
-        <div>pose: <span id="pose_txt">-</span></div>
+
+      <div class="toolbar-right">
+        <select id="selSpeed" class="speed">
+          <option value="0.5">x0.5</option>
+          <option value="1" selected>x1</option>
+          <option value="2">x2</option>
+          <option value="4">x4</option>
+          <option value="8">x8</option>
+        </select>
       </div>
     </div>
 
-    <div class="view">
-      <h2>Local Laser Point Cloud</h2>
-      <canvas id="cloud" width="700" height="700"></canvas>
-      <div class="hint">Red: hits, Blue: robot origin, X-forward, Y-left</div>
+    <!-- Main area -->
+    <div class="main">
+      <div class="viewer">
+        <canvas id="canvas" width="980" height="760"></canvas>
+        <div class="viewer-hint">拖拽平移 | 滚轮缩放 | 双击适配视图</div>
+
+        <!-- V3: overlay controls (content layers + view controls) -->
+        <div class="viewer-overlay">
+          <div class="overlay-acc">
+            <div class="acc-item is-collapsed" data-acc="layers">
+              <button class="acc-header" type="button" aria-expanded="false">
+                <span>图层</span><span class="acc-chev" aria-hidden="true"></span>
+              </button>
+              <div class="acc-body">
+                <label class="ck"><input id="ckMap" type="checkbox" checked>地图</label>
+                <label class="ck"><input id="ckCloud" type="checkbox" checked>点云</label>
+                <label class="ck"><input id="ckTraj" type="checkbox" checked>轨迹</label>
+                <label class="ck"><input id="ckRobot" type="checkbox" checked>机器人</label>
+              </div>
+            </div>
+
+            <div class="acc-item is-collapsed" data-acc="helpers">
+              <button class="acc-header" type="button" aria-expanded="false">
+                <span>辅助</span><span class="acc-chev" aria-hidden="true"></span>
+              </button>
+              <div class="acc-body">
+                <label class="ck"><input id="ckGrid" type="checkbox" checked>网格</label>
+                <label class="ck"><input id="ckAxes" type="checkbox" checked>坐标轴</label>
+                <label class="ck"><input id="ckScale" type="checkbox" checked>比例尺</label>
+              </div>
+            </div>
+
+            <div class="acc-item is-collapsed" data-acc="view">
+              <button class="acc-header" type="button" aria-expanded="false">
+                <span>视图</span><span class="acc-chev" aria-hidden="true"></span>
+              </button>
+              <div class="acc-body">
+                <div class="overlay-btns">
+                  <button id="btnFit" class="btn mini">适配</button>
+                  <button id="btnFitMap" class="btn mini">适配地图</button>
+                  <button id="btnFitTraj" class="btn mini">适配轨迹</button>
+                  <button id="btnResetView" class="btn mini">重置视图</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      
+      <div class="info">
+        <div class="info-head">
+          <div class="info-title">信息</div>
+          <div class="info-sub" id="infoHint">实时状态</div>
+        </div>
+
+        <div class="info-body">
+          <div class="info-sec">
+            <div class="sec-title">IMU</div>
+            <div class="kvgrid">
+              <div class="kv"><div class="k">pitch</div><div class="v mono" id="imu_pitch">-</div></div>
+              <div class="kv"><div class="k">roll</div><div class="v mono" id="imu_roll">-</div></div>
+              <div class="kv"><div class="k">yaw</div><div class="v mono" id="imu_yaw">-</div></div>
+            </div>
+          </div>
+
+          <div class="info-sec">
+            <div class="sec-title">运动</div>
+            <div class="kvgrid">
+              <div class="kv span2"><div class="k">odom</div><div class="v mono" id="odom_txt">-</div></div>
+              <div class="kv span2"><div class="k">slip</div><div class="v mono" id="slip_txt">-</div></div>
+              <div class="kv span2"><div class="k">pose</div><div class="v mono" id="pose_txt">-</div></div>
+            </div>
+          </div>
+
+          <div class="info-sec">
+            <div class="sec-title">时间戳</div>
+            <div class="kvgrid">
+              <div class="kv"><div class="k">scan_ts</div><div class="v mono" id="scan_ts">-</div></div>
+              <div class="kv"><div class="k">pose_ts</div><div class="v mono" id="pose_ts">-</div></div>
+              <div class="kv"><div class="k">map_ts</div><div class="v mono" id="map_ts">-</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
     </div>
 
-    <div class="view">
-      <h2>Pose Trajectory (Incremental while Playing)</h2>
-      <canvas id="traj" width="700" height="700"></canvas>
-      <div class="hint">Green polyline is appended during Play; Dragging does not append.</div>
+    <!-- Bottom timeline -->
+    <div class="timeline">
+      <input id="slider" type="range" min="0" max="10000" value="0" step="1" />
+      <div class="timeline-footer">
+        <div class="left">t(s): <span id="tsec">0.00</span></div>
+        <div class="right">当前倍速：<span id="speedLabel">x1</span></div>
+      </div>
     </div>
   </div>
 
   <script src="app.js"></script>
 </body>
 </html>
-

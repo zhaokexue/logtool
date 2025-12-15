@@ -113,52 +113,199 @@ static std::string makeMetaJson(const IndexDB& db) {
     uint64_t t1 = db.all.empty() ? 0 : db.all.back().timestamp_ns;
     double dur = (t1 > t0) ? double(t1 - t0) / 1e9 : 0.0;
 
-    return "{"
-        "\"t0_ns\":" + std::to_string(t0) + ","
-        "\"t1_ns\":" + std::to_string(t1) + ","
-        "\"duration_sec\":" + std::to_string(dur) +
+    const bool has_map  = db.by_type.count(TYPE_MAP)  && !db.by_type.at(TYPE_MAP).empty();
+    const bool has_imu  = db.by_type.count(TYPE_IMU)  && !db.by_type.at(TYPE_IMU).empty();
+    const bool has_odom = db.by_type.count(TYPE_ODOM) && !db.by_type.at(TYPE_ODOM).empty();
+    const bool has_slip = db.by_type.count(TYPE_SLIP) && !db.by_type.at(TYPE_SLIP).empty();
+    const bool has_state= db.by_type.count(TYPE_STATE)&& !db.by_type.at(TYPE_STATE).empty();
+
+    uint64_t map_latest_ts = 0;
+    if (has_map) map_latest_ts = db.by_type.at(TYPE_MAP).back().timestamp_ns;
+
+    return "{" 
+        "\"t0_ns\":" + std::to_string(t0) + "," 
+        "\"t1_ns\":" + std::to_string(t1) + "," 
+        "\"duration_sec\":" + std::to_string(dur) + "," 
+        "\"has_map\":" + std::string(has_map ? "true" : "false") + "," 
+        "\"has_imu\":" + std::string(has_imu ? "true" : "false") + "," 
+        "\"has_odom\":" + std::string(has_odom ? "true" : "false") + "," 
+        "\"has_slip\":" + std::string(has_slip ? "true" : "false") + "," 
+        "\"has_state\":" + std::string(has_state ? "true" : "false") + "," 
+        "\"map_latest_ts\":" + std::to_string(map_latest_ts) +
     "}";
+}
+
+static std::string b64encode(const uint8_t* data, size_t len) {
+    static const char* tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((len + 2) / 3) * 4);
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t v = (uint32_t(data[i]) << 16);
+        if (i + 1 < len) v |= (uint32_t(data[i + 1]) << 8);
+        if (i + 2 < len) v |= (uint32_t(data[i + 2]));
+
+        out.push_back(tbl[(v >> 18) & 63]);
+        out.push_back(tbl[(v >> 12) & 63]);
+        if (i + 1 < len) out.push_back(tbl[(v >> 6) & 63]); else out.push_back('=');
+        if (i + 2 < len) out.push_back(tbl[v & 63]); else out.push_back('=');
+    }
+    return out;
+}
+
+static std::string stateToText(uint32_t s) {
+    // Map to logtool's RobotState enum values.
+    switch (s) {
+        case 0: return "selfcheck";
+        case 1: return "checkdock";
+        case 2: return "findwall";
+        case 3: return "followwall";
+        case 4: return "coverage";
+        case 5: return "gohome";
+        case 6: return "end";
+        default: return std::to_string(s);
+    }
 }
 
 // Build /api/frame response compatible with existing web/app.js
 static std::string makeFrameJson(uint64_t target_ts, const IndexDB& db, LogReader& reader) {
-    const IndexItem* is = db.nearest(TYPE_SCAN, target_ts);
-    if (!is) return "{\"error\":\"no scan\"}";
-
-    Record rs = reader.readAt(is->offset);
-    LaserScan scan = parseRecordPayload<LaserScan>(rs);
-
-    const IndexItem* ip = db.nearest(TYPE_POSE, rs.timestamp);
+    // Pose is the primary timeline for UI. If missing, fallback to scan.
+    const IndexItem* ip = db.nearest(TYPE_POSE, target_ts);
     if (!ip) return "{\"error\":\"no pose\"}";
 
     Record rp = reader.readAt(ip->offset);
     Pose2D pose = parseRecordPayload<Pose2D>(rp);
+    const uint64_t pose_ts = rp.timestamp;
+
+    // scan aligned to pose_ts for stable visualization
+    const IndexItem* is = db.nearest(TYPE_SCAN, pose_ts);
+    LaserScan scan;
+    uint64_t scan_ts = 0;
+    bool has_scan = false;
+    if (is) {
+        Record rs = reader.readAt(is->offset);
+        scan = parseRecordPayload<LaserScan>(rs);
+        scan_ts = rs.timestamp;
+        has_scan = true;
+    }
+
+    // optional telemetry
+    bool has_imu = false, has_odom = false, has_slip = false, has_state = false;
+    Imu imu{};
+    Odom odom{};
+    Slip slip{};
+    RobotState state = RobotState::selfcheck;
+    uint64_t map_ts = 0;
+
+    if (const IndexItem* ii = db.nearest(TYPE_IMU, pose_ts)) {
+        Record ri = reader.readAt(ii->offset);
+        imu = parseRecordPayload<Imu>(ri);
+        has_imu = true;
+    }
+    if (const IndexItem* io = db.nearest(TYPE_ODOM, pose_ts)) {
+        Record ro = reader.readAt(io->offset);
+        odom = parseRecordPayload<Odom>(ro);
+        has_odom = true;
+    }
+    if (const IndexItem* isl = db.nearest(TYPE_SLIP, pose_ts)) {
+        Record rsl = reader.readAt(isl->offset);
+        slip = parseRecordPayload<Slip>(rsl);
+        has_slip = true;
+    }
+    if (const IndexItem* ist = db.nearest(TYPE_STATE, pose_ts)) {
+        Record rst = reader.readAt(ist->offset);
+        state = parseRecordPayload<RobotState>(rst);
+        has_state = true;
+    }
+    if (const IndexItem* im = db.nearest(TYPE_MAP, pose_ts)) {
+        map_ts = im->timestamp_ns;
+    }
+
+    const uint64_t t0 = db.all.empty() ? 0 : db.all.front().timestamp_ns;
+    const double rel_sec = (pose_ts > t0) ? double(pose_ts - t0) / 1e9 : 0.0;
 
     std::string j;
-    j.reserve(64 * 1024);
-
+    j.reserve(96 * 1024);
     j += "{";
-    j += "\"pose_ts\":" + std::to_string(rp.timestamp) + ",";
-    j += "\"scan_ts\":" + std::to_string(rs.timestamp) + ",";
+    j += "\"time_text\":\"t0+" + std::to_string(rel_sec) + "s\",";
+    j += "\"pose_ts\":" + std::to_string(pose_ts) + ",";
+    j += "\"scan_ts\":" + std::to_string(scan_ts) + ",";
+    j += "\"map_ts\":" + std::to_string(map_ts) + ",";
     j += "\"pose\":{";
     j += "\"x\":" + std::to_string(pose.x) + ",";
     j += "\"y\":" + std::to_string(pose.y) + ",";
     j += "\"yaw\":" + std::to_string(pose.angle) + "},";
-    j += "\"points\":[";
 
-    bool first = true;
-    for (size_t i = 0; i < scan.beams.size(); ++i) {
-        float r = scan.beams[i];
-        float ang = scan.angle_min + float(i) * scan.angle_increment;
-        float lx = r * std::cos(ang);
-        float ly = r * std::sin(ang);
-
-        if (!first) j += ",";
-        first = false;
-        j += "[" + std::to_string(lx) + "," + std::to_string(ly) + "]";
+    if (has_imu) {
+        j += "\"imu\":{";
+        j += "\"pitch\":" + std::to_string(imu.pitch) + ",";
+        j += "\"roll\":" + std::to_string(imu.roll) + ",";
+        j += "\"yaw\":" + std::to_string(imu.yaw) + "},";
+    } else {
+        j += "\"imu\":null,";
     }
 
+    if (has_odom) {
+        // UI shows one odom; default to fuse_pose.
+        j += "\"odom\":{";
+        j += "\"x\":" + std::to_string(odom.fuse_pose.x) + ",";
+        j += "\"y\":" + std::to_string(odom.fuse_pose.y) + ",";
+        j += "\"yaw\":" + std::to_string(odom.fuse_pose.angle) + "},";
+    } else {
+        j += "\"odom\":null,";
+    }
+
+    if (has_slip) {
+        int slip_any = (slip.line_slip || slip.rotate_slip) ? 1 : 0;
+        j += "\"slip\":" + std::to_string(slip_any) + ",";
+    } else {
+        j += "\"slip\":null,";
+    }
+
+    if (has_state) {
+        j += "\"state\":\"" + stateToText(static_cast<uint32_t>(state)) + "\",";
+    } else {
+        j += "\"state\":null,";
+    }
+
+    // points in robot-local frame
+    j += "\"points\":[";
+    if (has_scan) {
+        bool first = true;
+        for (size_t i = 0; i < scan.beams.size(); ++i) {
+            float r = scan.beams[i];
+            float ang = scan.angle_min + float(i) * scan.angle_increment;
+            float lx = r * std::cos(ang);
+            float ly = r * std::sin(ang);
+            if (!first) j += ",";
+            first = false;
+            j += "[" + std::to_string(lx) + "," + std::to_string(ly) + "]";
+        }
+    }
     j += "]";
+    j += "}";
+    return j;
+}
+
+static std::string makeMapJson(uint64_t target_ts, const IndexDB& db, LogReader& reader) {
+    const IndexItem* im = db.nearest(TYPE_MAP, target_ts);
+    if (!im) return "{\"error\":\"no map\"}";
+    Record rm = reader.readAt(im->offset);
+    GridMap map = parseRecordPayload<GridMap>(rm);
+
+    // GridMap::data is std::vector<int8_t> (signed). We base64 encode raw bytes.
+    const uint8_t* raw = reinterpret_cast<const uint8_t*>(map.data.data());
+    std::string b64 = b64encode(raw, map.data.size());
+
+    std::string j;
+    j.reserve(b64.size() + 512);
+    j += "{";
+    j += "\"map_ts\":" + std::to_string(rm.timestamp) + ",";
+    j += "\"w\":" + std::to_string(map.width) + ",";
+    j += "\"h\":" + std::to_string(map.height) + ",";
+    j += "\"res\":" + std::to_string(map.resolution) + ",";
+    j += "\"ox\":" + std::to_string(map.origin_x) + ",";
+    j += "\"oy\":" + std::to_string(map.origin_y) + ",";
+    j += "\"data_b64\":\"" + b64 + "\"";
     j += "}";
     return j;
 }
@@ -291,6 +438,16 @@ int main(int argc, char** argv) {
                 std::string v = getQueryParamU64(target, "ts_ns");
                 if (!v.empty()) ts = static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
                 std::string body = makeFrameJson(ts, db, reader);
+                sendHttpResponse(client_fd, 200, "application/json; charset=utf-8", body);
+                ::close(client_fd);
+                continue;
+            }
+
+            if (target.rfind("/api/map", 0) == 0) {
+                uint64_t ts = 0;
+                std::string v = getQueryParamU64(target, "ts_ns");
+                if (!v.empty()) ts = static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
+                std::string body = makeMapJson(ts, db, reader);
                 sendHttpResponse(client_fd, 200, "application/json; charset=utf-8", body);
                 ::close(client_fd);
                 continue;
