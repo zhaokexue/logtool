@@ -3,9 +3,9 @@
 cd /home/kenan/learn/autoRecord/sim/logtool
 
 ## 创建python虚拟环境
-sudo apt install python3-venv
-python3 -m venv .venv
-source .venv/bin/activate
+sudo apt install python3-venv #安装虚拟环境支持
+python3 -m venv .venv         #创建虚拟环境
+source .venv/bin/activate     #激活虚拟环境
 
 ## 默认，很慢
 python -m pip install -U pip

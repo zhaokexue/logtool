@@ -513,8 +513,11 @@ function render(frame){
 async function refreshAtTs(tsNs, isDragging){
   if (!meta) return;
 
-  // throttle while dragging
-  const minIntervalMs = isDragging ? 33 : 0;
+  // throttle refresh to reduce CPU/GC pressure (important while recording)
+  const minIntervalMs = isDragging
+    ? 33
+    : (isRecording ? REFRESH_MS_RECORD : REFRESH_MS_NORMAL);
+
   const now = performance.now();
   if (refreshAtTs._last && (now - refreshAtTs._last) < minIntervalMs) return;
   refreshAtTs._last = now;
@@ -570,31 +573,99 @@ selSpeed.addEventListener('change', ()=>{
   speedLabelEl.textContent = `x${speed}`;
 });
 
-// Simple canvas recorder: record the main canvas as webm
+// Full-UI recorder: record the whole page via getDisplayMedia (current tab/window).
+// Note: browsers will show a permission picker; this cannot be bypassed for security.
 let recorder = null;
 let recChunks = [];
-btnRecord.addEventListener('click', ()=>{
-  if (!recorder){
-    const stream = canvas.captureStream(30);
-    recorder = new MediaRecorder(stream, {mimeType: 'video/webm'});
+let recStream = null;
+let isRecording = false;
+
+// 刷新周期：平时 30Hz（可保持你现在的体验），录制时 20Hz
+const REFRESH_MS_NORMAL = 33;   // 30Hz
+const REFRESH_MS_RECORD = 50;   // 20Hz
+
+function pickBestMimeType(){
+  const candidates = [
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm',
+  ];
+  for (const t of candidates){
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return '';
+}
+
+function stopRecordingUI(){
+  try {
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+  } catch (e) {
+    // ignore
+  }
+}
+
+btnRecord.addEventListener('click', async ()=>{
+  if (recorder){
+    stopRecordingUI();
+    return;
+  }
+
+  try {
+    // Capture the current tab/window (entire UI), not just the map canvas.
+    recStream = await navigator.mediaDevices.getDisplayMedia({
+      video: {
+        frameRate: 30,
+      },
+      audio: false,
+    });
+
+    const mimeType = pickBestMimeType();
+    const opts = mimeType ? { mimeType } : undefined;
+    recorder = new MediaRecorder(recStream, opts);
     recChunks = [];
+
     recorder.ondataavailable = (e)=>{ if (e.data && e.data.size) recChunks.push(e.data); };
     recorder.onstop = ()=>{
-      const blob = new Blob(recChunks, {type:'video/webm'});
+      const blob = new Blob(recChunks, {type: mimeType || 'video/webm'});
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `log_view_${Date.now()}.webm`;
+      a.download = `log_view_fullui_${Date.now()}.webm`;
       a.click();
       URL.revokeObjectURL(url);
+
+      // cleanup
+      isRecording = false;
       recorder = null;
       recChunks = [];
       btnRecord.textContent = '录制';
+      if (recStream){
+        for (const tr of recStream.getTracks()) tr.stop();
+        recStream = null;
+      }
     };
-    recorder.start();
+
+    // If the user clicks "Stop sharing" in the browser UI, end recording automatically.
+    const vtrack = recStream.getVideoTracks()[0];
+    if (vtrack){
+      vtrack.addEventListener('ended', ()=> stopRecordingUI());
+    }
+
+    recorder.start(1000); // chunk every 1s to avoid large memory spikes
+    isRecording = true;
     btnRecord.textContent = '停止';
-  } else {
-    recorder.stop();
+  } catch (e) {
+    // User cancelled or browser blocked capture.
+    isRecording = false;
+    recorder = null;
+    recChunks = [];
+    btnRecord.textContent = '录制';
+    if (recStream){
+      for (const tr of recStream.getTracks()) tr.stop();
+      recStream = null;
+    }
+    console.warn('recording cancelled/failed:', e);
+    alert('录制启动失败：请允许浏览器录制当前标签页/窗口。');
   }
 });
 

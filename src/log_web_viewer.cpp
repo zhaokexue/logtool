@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include "log_io.hpp"
 #include "index.hpp"
@@ -370,6 +371,7 @@ static std::string getQueryParamU64(const std::string& target, const std::string
 }
 
 int main(int argc, char** argv) {
+    signal(SIGPIPE, SIG_IGN);   // 关键：避免 Broken pipe 直接杀进程
     try {
         std::string log_path = "data/fake_cleaning.log";
         std::string web_root = "web";
