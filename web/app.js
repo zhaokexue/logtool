@@ -454,7 +454,7 @@ function drawTrajectory(){
   if (!ckTraj || !ckTraj.checked) return;
   if (trajPts.length < 2) return;
   ctx.save();
-  ctx.strokeStyle = '#e31b23';
+  ctx.strokeStyle = '#000000';
   ctx.lineWidth = 2;
   ctx.beginPath();
   const p0 = worldToScreen(trajPts[0].x, trajPts[0].y);
@@ -465,7 +465,7 @@ function drawTrajectory(){
   }
   ctx.stroke();
   // red points
-  ctx.fillStyle = '#e31b23';
+  ctx.fillStyle = '#000000';
   for (let i=0;i<trajPts.length;i+=Math.max(1, Math.floor(trajPts.length/300))){
     ctx.beginPath();
     const p = worldToScreen(trajPts[i].x, trajPts[i].y);
@@ -482,7 +482,8 @@ function drawScan(frame){
   const cy = Math.cos(yaw), sy = Math.sin(yaw);
 
   ctx.save();
-  ctx.fillStyle = '#e31b23';
+  // Point cloud stays RED (do not inherit other drawing colors)
+  ctx.fillStyle = '#ff0000';
   for (let i=0;i<frame.points.length;i+=1){
     const p = frame.points[i];
     const lx = p[0], ly = p[1];
@@ -607,31 +608,94 @@ selSpeed.addEventListener('change', ()=>{
   speedLabelEl.textContent = `x${speed}`;
 });
 
-// Simple canvas recorder: record the main canvas as webm
+// Screen recorder: record the entire screen (user selects monitor/window/tab), 20 Hz
 let recorder = null;
 let recChunks = [];
-btnRecord.addEventListener('click', ()=>{
-  if (!recorder){
-    const stream = canvas.captureStream(30);
-    recorder = new MediaRecorder(stream, {mimeType: 'video/webm'});
-    recChunks = [];
-    recorder.ondataavailable = (e)=>{ if (e.data && e.data.size) recChunks.push(e.data); };
-    recorder.onstop = ()=>{
-      const blob = new Blob(recChunks, {type:'video/webm'});
+let recStream = null;
+
+function pickRecorderOptions(){
+  const candidates = [
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm'
+  ];
+  for (const mt of candidates){
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(mt)){
+      return { mimeType: mt };
+    }
+  }
+  return {};
+}
+
+async function startScreenRecording(){
+  // User must select "Entire Screen" in the picker to achieve true full-screen recording.
+  // We keep audio disabled by default to avoid permissions surprises.
+  recStream = await navigator.mediaDevices.getDisplayMedia({
+    video: {
+      frameRate: 20
+    },
+    audio: false
+  });
+
+  const opts = pickRecorderOptions();
+  recorder = new MediaRecorder(recStream, opts);
+  recChunks = [];
+
+  recorder.ondataavailable = (e)=>{ if (e.data && e.data.size) recChunks.push(e.data); };
+
+  // If the user stops sharing from the browser UI, end gracefully.
+  const tracks = recStream.getVideoTracks();
+  if (tracks && tracks[0]){
+    tracks[0].addEventListener('ended', ()=>{
+      if (recorder && recorder.state === 'recording'){
+        recorder.stop();
+      }
+    });
+  }
+
+  recorder.onstop = ()=>{
+    try{
+      const mime = (opts && opts.mimeType) ? opts.mimeType : 'video/webm';
+      const blob = new Blob(recChunks, {type: mime});
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `log_view_${Date.now()}.webm`;
+      a.download = `screen_record_${Date.now()}.webm`;
       a.click();
       URL.revokeObjectURL(url);
+    } finally {
+      // Clean up tracks
+      if (recStream){
+        recStream.getTracks().forEach(t=>t.stop());
+      }
+      recStream = null;
       recorder = null;
       recChunks = [];
       btnRecord.textContent = '录制';
-    };
-    recorder.start();
-    btnRecord.textContent = '停止';
-  } else {
+    }
+  };
+
+  recorder.start();
+  btnRecord.textContent = '停止';
+}
+
+btnRecord.addEventListener('click', async ()=>{
+  // Stop
+  if (recorder && recorder.state === 'recording'){
     recorder.stop();
+    return;
+  }
+
+  // Start
+  try{
+    await startScreenRecording();
+  } catch (e){
+    // User canceled or permission denied; restore UI state
+    recorder = null;
+    recStream = null;
+    recChunks = [];
+    btnRecord.textContent = '录制';
+    console.warn('Screen recording canceled/failed:', e);
   }
 });
 
