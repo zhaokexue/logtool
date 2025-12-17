@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <cmath>
 #include <vector>
+#include <limits>
 #include <stdexcept>
 #include <sstream>
 
@@ -20,6 +21,92 @@
 #include "index.hpp"
 #include "codec.hpp"
 #include "log_types.hpp"
+
+// ---------------- trajectory ----------------
+// We build a pose timeline once (startup) and serve trajectory queries from it.
+struct PoseRec {
+    uint64_t ts_ns{0};
+    float x{0.f};
+    float y{0.f};
+    float yaw{0.f};
+};
+
+static std::vector<PoseRec> buildPoseTimeline(const IndexDB& db, LogReader& reader) {
+    std::vector<PoseRec> poses;
+    auto it = db.by_type.find(TYPE_POSE);
+    if (it == db.by_type.end() || it->second.empty()) return poses;
+
+    poses.reserve(it->second.size());
+    for (const auto& item : it->second) {
+        Record r = reader.readAt(item.offset);
+        Pose2D p = parseRecordPayload<Pose2D>(r);
+        poses.push_back(PoseRec{r.timestamp, p.x, p.y, p.angle});
+    }
+    std::sort(poses.begin(), poses.end(), [](const PoseRec& a, const PoseRec& b){
+        return a.ts_ns < b.ts_ns;
+    });
+    return poses;
+}
+
+static size_t lastIndexLE(const std::vector<PoseRec>& poses, uint64_t ts_ns) {
+    if (poses.empty()) return 0;
+    auto it = std::upper_bound(
+        poses.begin(), poses.end(), ts_ns,
+        [](uint64_t v, const PoseRec& p){ return v < p.ts_ns; }
+    );
+    if (it == poses.begin()) return 0;
+    return static_cast<size_t>((it - poses.begin()) - 1);
+}
+
+static std::vector<float> buildTrajPrefixXY(const std::vector<PoseRec>& poses,
+                                            uint64_t target_ts,
+                                            uint64_t step_ms,
+                                            size_t max_points) {
+    std::vector<float> out;
+    if (poses.empty()) return out;
+    if (step_ms == 0) step_ms = 50;
+    if (max_points == 0) max_points = 8000;
+
+    size_t end_idx = lastIndexLE(poses, target_ts);
+    const uint64_t step_ns = step_ms * 1000000ULL;
+    const uint64_t t0 = poses.front().ts_ns;
+    const uint64_t t_end = poses[end_idx].ts_ns;
+
+    out.reserve(std::min(max_points, end_idx + 1) * 2);
+
+    // Monotonic walk through poses for O(n) sampling.
+    size_t cur = 0;
+    float lastx = std::numeric_limits<float>::quiet_NaN();
+    float lasty = std::numeric_limits<float>::quiet_NaN();
+
+    for (uint64_t t = t0; t <= t_end && (out.size() / 2) < max_points; t += step_ns) {
+        while (cur + 1 <= end_idx && poses[cur + 1].ts_ns <= t) cur++;
+        const auto& p = poses[cur];
+
+        // De-dup very small movements to keep the polyline light.
+        if (std::isfinite(lastx)) {
+            const float dx = p.x - lastx;
+            const float dy = p.y - lasty;
+            if ((dx*dx + dy*dy) < 1e-4f) continue; // < 1cm
+        }
+
+        out.push_back(p.x);
+        out.push_back(p.y);
+        lastx = p.x;
+        lasty = p.y;
+    }
+
+    // Ensure the end point is included.
+    const auto& pe = poses[end_idx];
+    if (out.size() < 2 || out[out.size() - 2] != pe.x || out[out.size() - 1] != pe.y) {
+        if ((out.size() / 2) < max_points) {
+            out.push_back(pe.x);
+            out.push_back(pe.y);
+        }
+    }
+
+    return out;
+}
 
 // ---------------- helpers ----------------
 static bool ends_with(const std::string& s, const std::string& suffix) {
@@ -311,6 +398,31 @@ static std::string makeMapJson(uint64_t target_ts, const IndexDB& db, LogReader&
     return j;
 }
 
+static std::string makeTrajJson(uint64_t target_ts,
+                                uint64_t step_ms,
+                                size_t max_points,
+                                const std::vector<PoseRec>& poses) {
+    if (poses.empty()) return "{\"error\":\"no pose\"}";
+    if (step_ms == 0) step_ms = 50;
+    if (max_points == 0) max_points = 8000;
+
+    std::vector<float> xy = buildTrajPrefixXY(poses, target_ts, step_ms, max_points);
+    const uint8_t* raw = reinterpret_cast<const uint8_t*>(xy.data());
+    const size_t raw_len = xy.size() * sizeof(float);
+    std::string b64 = b64encode(raw, raw_len);
+
+    std::string j;
+    j.reserve(b64.size() + 256);
+    j += "{";
+    j += "\"t0_ns\":" + std::to_string(poses.front().ts_ns) + ",";
+    j += "\"t1_ns\":" + std::to_string(target_ts) + ",";
+    j += "\"step_ms\":" + std::to_string(step_ms) + ",";
+    j += "\"count\":" + std::to_string(xy.size() / 2) + ",";
+    j += "\"xy_f32_b64\":\"" + b64 + "\"";
+    j += "}";
+    return j;
+}
+
 // -------- minimal HTTP server --------
 struct HttpRequest {
     std::string method;
@@ -394,8 +506,12 @@ int main(int argc, char** argv) {
         LogReader reader(log_path);
         IndexDB db = loadOrBuildIndex(log_path, idx_path, rebuild_idx);
 
+        // Build pose timeline for trajectory queries (seek/drag correctness + lightweight rendering).
+        std::vector<PoseRec> poses = buildPoseTimeline(db, reader);
+
         double dur = (db.all.empty() ? 0.0 : double(db.all.back().timestamp_ns - db.all.front().timestamp_ns) / 1e9);
         std::cout << "Index ready. items=" << db.all.size() << " duration=" << dur << " sec\n";
+        std::cout << "Pose timeline ready. poses=" << poses.size() << "\n";
         std::cout << "Serving http://127.0.0.1:" << port << "\n";
 
         int server_fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -450,6 +566,24 @@ int main(int argc, char** argv) {
                 std::string v = getQueryParamU64(target, "ts_ns");
                 if (!v.empty()) ts = static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
                 std::string body = makeMapJson(ts, db, reader);
+                sendHttpResponse(client_fd, 200, "application/json; charset=utf-8", body);
+                ::close(client_fd);
+                continue;
+            }
+
+            if (target.rfind("/api/traj", 0) == 0) {
+                uint64_t ts = 0;
+                uint64_t step_ms = 50;
+                size_t max_points = 8000;
+
+                std::string v = getQueryParamU64(target, "ts_ns");
+                if (!v.empty()) ts = static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
+                v = getQueryParamU64(target, "step_ms");
+                if (!v.empty()) step_ms = static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
+                v = getQueryParamU64(target, "max_points");
+                if (!v.empty()) max_points = static_cast<size_t>(std::strtoull(v.c_str(), nullptr, 10));
+
+                std::string body = makeTrajJson(ts, step_ms, max_points, poses);
                 sendHttpResponse(client_fd, 200, "application/json; charset=utf-8", body);
                 ::close(client_fd);
                 continue;

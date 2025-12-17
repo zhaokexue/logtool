@@ -72,6 +72,38 @@ let lastFrame = null;
 let trajPts = []; // appended while playing
 let currentTsNs = 0n;
 
+// Trajectory-from-backend (prefix) for correct seek/drag rendering.
+let trajReq = { ac:null, lastMs:0 };
+async function refreshTrajPrefix(tsNs, force=false){
+  if (!meta) return;
+  const now = performance.now();
+  const minMs = force ? 0 : (dragging ? 120 : 300);
+  if (!force && (now - trajReq.lastMs) < minMs) return;
+  trajReq.lastMs = now;
+
+  if (trajReq.ac) try { trajReq.ac.abort(); } catch(_) {}
+  const ac = new AbortController();
+  trajReq.ac = ac;
+
+  // 20Hz trajectory for smooth recording and light rendering.
+  const step_ms = 50;
+  const max_points = 12000;
+  try {
+    const r = await fetch(`/api/traj?ts_ns=${tsNs.toString()}&step_ms=${step_ms}&max_points=${max_points}`, {signal: ac.signal});
+    const j = await r.json();
+    if (j.error) return;
+    const bytes = b64ToBytes(j.xy_f32_b64);
+    const f32 = new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength/4));
+    const pts = [];
+    for (let i=0; i+1<f32.length; i+=2){
+      pts.push({x: f32[i], y: f32[i+1]});
+    }
+    trajPts = pts;
+  } catch(e){
+    // ignore abort or network errors during drag
+  }
+}
+
 // map cache
 let mapCache = null; // {ts, w,h,res, origin:[x,y], data:Uint8Array/int8Array}
 
@@ -513,11 +545,8 @@ function render(frame){
 async function refreshAtTs(tsNs, isDragging){
   if (!meta) return;
 
-  // throttle refresh to reduce CPU/GC pressure (important while recording)
-  const minIntervalMs = isDragging
-    ? 33
-    : (isRecording ? REFRESH_MS_RECORD : REFRESH_MS_NORMAL);
-
+  // throttle while dragging
+  const minIntervalMs = isDragging ? 33 : 0;
   const now = performance.now();
   if (refreshAtTs._last && (now - refreshAtTs._last) < minIntervalMs) return;
   refreshAtTs._last = now;
@@ -540,8 +569,13 @@ async function refreshAtTs(tsNs, isDragging){
 
     // append trajectory only when playing and not dragging
     if (playing && !dragging && frame.pose){
-      trajPts.push({x: frame.pose.x, y: frame.pose.y});
-      if (trajPts.length > 200000) trajPts.shift();
+      const x = frame.pose.x;
+      const y = frame.pose.y;
+      const last = trajPts.length ? trajPts[trajPts.length - 1] : null;
+      if (!last || (Math.abs(last.x - x) + Math.abs(last.y - y)) > 1e-6){
+        trajPts.push({x, y});
+        if (trajPts.length > 200000) trajPts.shift();
+      }
     }
   } catch (e) {
     // ignore abort
@@ -573,108 +607,50 @@ selSpeed.addEventListener('change', ()=>{
   speedLabelEl.textContent = `x${speed}`;
 });
 
-// Full-UI recorder: record the whole page via getDisplayMedia (current tab/window).
-// Note: browsers will show a permission picker; this cannot be bypassed for security.
+// Simple canvas recorder: record the main canvas as webm
 let recorder = null;
 let recChunks = [];
-let recStream = null;
-let isRecording = false;
-
-// 刷新周期：平时 30Hz（可保持你现在的体验），录制时 20Hz
-const REFRESH_MS_NORMAL = 33;   // 30Hz
-const REFRESH_MS_RECORD = 50;   // 20Hz
-
-function pickBestMimeType(){
-  const candidates = [
-    'video/webm;codecs=vp9',
-    'video/webm;codecs=vp8',
-    'video/webm',
-  ];
-  for (const t of candidates){
-    if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
-  }
-  return '';
-}
-
-function stopRecordingUI(){
-  try {
-    if (recorder && recorder.state !== 'inactive') recorder.stop();
-  } catch (e) {
-    // ignore
-  }
-}
-
-btnRecord.addEventListener('click', async ()=>{
-  if (recorder){
-    stopRecordingUI();
-    return;
-  }
-
-  try {
-    // Capture the current tab/window (entire UI), not just the map canvas.
-    recStream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        frameRate: 30,
-      },
-      audio: false,
-    });
-
-    const mimeType = pickBestMimeType();
-    const opts = mimeType ? { mimeType } : undefined;
-    recorder = new MediaRecorder(recStream, opts);
+btnRecord.addEventListener('click', ()=>{
+  if (!recorder){
+    const stream = canvas.captureStream(30);
+    recorder = new MediaRecorder(stream, {mimeType: 'video/webm'});
     recChunks = [];
-
     recorder.ondataavailable = (e)=>{ if (e.data && e.data.size) recChunks.push(e.data); };
     recorder.onstop = ()=>{
-      const blob = new Blob(recChunks, {type: mimeType || 'video/webm'});
+      const blob = new Blob(recChunks, {type:'video/webm'});
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `log_view_fullui_${Date.now()}.webm`;
+      a.download = `log_view_${Date.now()}.webm`;
       a.click();
       URL.revokeObjectURL(url);
-
-      // cleanup
-      isRecording = false;
       recorder = null;
       recChunks = [];
       btnRecord.textContent = '录制';
-      if (recStream){
-        for (const tr of recStream.getTracks()) tr.stop();
-        recStream = null;
-      }
     };
-
-    // If the user clicks "Stop sharing" in the browser UI, end recording automatically.
-    const vtrack = recStream.getVideoTracks()[0];
-    if (vtrack){
-      vtrack.addEventListener('ended', ()=> stopRecordingUI());
-    }
-
-    recorder.start(1000); // chunk every 1s to avoid large memory spikes
-    isRecording = true;
+    recorder.start();
     btnRecord.textContent = '停止';
-  } catch (e) {
-    // User cancelled or browser blocked capture.
-    isRecording = false;
-    recorder = null;
-    recChunks = [];
-    btnRecord.textContent = '录制';
-    if (recStream){
-      for (const tr of recStream.getTracks()) tr.stop();
-      recStream = null;
-    }
-    console.warn('recording cancelled/failed:', e);
-    alert('录制启动失败：请允许浏览器录制当前标签页/窗口。');
+  } else {
+    recorder.stop();
   }
 });
 
 slider.addEventListener('pointerdown', ()=>{ dragging = true; });
-slider.addEventListener('pointerup', ()=>{ dragging = false; });
+slider.addEventListener('pointerup', ()=>{
+  dragging = false;
+  // After seek/drag, ensure trajectory matches [t0, current] and continue accumulating on play.
+  (async()=>{
+    await refreshTrajPrefix(currentTsNs, true);
+    if (playing) lastAnimMs = performance.now();
+    await refreshAtTs(currentTsNs, false);
+  })();
+});
 slider.addEventListener('input', async ()=>{
   const sec = secFromSlider();
   updateTimeline(sec);
-  await refreshAtTs(tsFromSec(sec), true);
+  const tsNs = tsFromSec(sec);
+  await refreshTrajPrefix(tsNs, false);
+  await refreshAtTs(tsNs, true);
 });
 
 // ---------- V3: canvas pan/zoom interactions ----------
@@ -813,6 +789,7 @@ function loop(){
   cam.offsetY = canvas.height/2;
 
   await ensureMap(tsFromSec(sec));
+  await refreshTrajPrefix(tsFromSec(sec), true);
   await refreshAtTs(tsFromSec(sec), false);
 
   // Auto-fit once on load (prefer map, else traj/pose)
