@@ -410,17 +410,28 @@ function drawMap(){
   if (!mapCache._img || mapCache._img_w !== w || mapCache._img_h !== h){
     const img = ctx.createImageData(w, h);
     const out = img.data;
-    for (let i=0;i<w*h;i++){
-      const v = data[i];
-      // convention: -1 unknown, 0 free, 100 occupied
-      let c = 255;
-      if (v < 0) c = 240;
-      else if (v === 0) c = 255;
-      else c = 60;
-      out[i*4+0] = c;
-      out[i*4+1] = c;
-      out[i*4+2] = c;
-      out[i*4+3] = 255;
+
+    // UI-layer fix: flip Y when sampling grid cells.
+    // Numpy-style arrays often have row 0 at TOP, while our world convention is Y-up.
+    // We keep the stored map as-is, and only flip during rendering.
+    for (let y = 0; y < h; y++){
+      const yy = (h - 1 - y); // <-- flip Y
+      for (let x = 0; x < w; x++){
+        const src = yy * w + x;
+        const v = data[src];
+
+        // convention: -1 unknown, 0 free, 100 occupied
+        let c = 255;
+        if (v < 0) c = 240;
+        else if (v === 0) c = 255;
+        else c = 60;
+
+        const di = (y * w + x) * 4;
+        out[di + 0] = c;
+        out[di + 1] = c;
+        out[di + 2] = c;
+        out[di + 3] = 255;
+      }
     }
     mapCache._img = img;
     mapCache._img_w = w;

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <random>
 #include <cmath>
+#include <limits>
 
 #include "log_types.hpp"
 #include "codec.hpp"
@@ -183,8 +184,7 @@ inline GridMap gridMapFromOcc(const NpyArrayI16& occ, float resolution) {
 }
 
 // =========================
-// Simplified LaserScan: distance to map bounding box
-// (Fast, stable. Later you can upgrade to grid raycast.)
+// Old Simplified LaserScan (rect boundary) - kept as fallback/reference
 // =========================
 inline float rayToRectBoundary(float x, float y, float ang, float xmin, float xmax, float ymin, float ymax) {
     float dx = std::cos(ang);
@@ -205,6 +205,144 @@ inline float rayToRectBoundary(float x, float y, float ang, float xmin, float xm
         if (ty2 > 0) tmin = std::min(tmin, ty2);
     }
     return std::clamp(tmin, 0.05f, 8.0f);
+}
+
+// =========================
+// Correct LaserScan: raycast against occupancy grid (DDA traversal)
+// =========================
+inline bool isOccupiedCell(const GridMap& grid, int cx, int cy, int8_t occ_thresh = 50) {
+    if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height) return false;
+    const int8_t v = grid.data[static_cast<size_t>(cy) * grid.width + cx];
+    return (v >= occ_thresh); // 100 or >=50 treated as obstacle
+}
+
+// Ray vs AABB intersection (2D). Returns true if intersects in forward direction.
+// Outputs entry distance t_enter (>=0) and exit distance t_exit.
+inline bool rayIntersectAABB2D(
+    float x0, float y0, float dx, float dy,
+    float xmin, float xmax, float ymin, float ymax,
+    float& t_enter, float& t_exit
+) {
+    const float inf = std::numeric_limits<float>::infinity();
+    float tx1 = -inf, tx2 = inf;
+    float ty1 = -inf, ty2 = inf;
+
+    if (std::fabs(dx) > 1e-8f) {
+        tx1 = (xmin - x0) / dx;
+        tx2 = (xmax - x0) / dx;
+        if (tx1 > tx2) std::swap(tx1, tx2);
+    } else {
+        // Parallel to Y axis: must be within slab
+        if (x0 < xmin || x0 > xmax) return false;
+    }
+
+    if (std::fabs(dy) > 1e-8f) {
+        ty1 = (ymin - y0) / dy;
+        ty2 = (ymax - y0) / dy;
+        if (ty1 > ty2) std::swap(ty1, ty2);
+    } else {
+        // Parallel to X axis: must be within slab
+        if (y0 < ymin || y0 > ymax) return false;
+    }
+
+    t_enter = std::max(tx1, ty1);
+    t_exit  = std::min(tx2, ty2);
+    if (t_exit < 0) return false;        // box is behind ray
+    if (t_enter > t_exit) return false;  // miss
+    if (t_enter < 0) t_enter = 0;        // start inside box
+    return true;
+}
+
+inline float raycastOccGridDDA(
+    const GridMap& grid,
+    float x0, float y0,
+    float ang,
+    float max_range = 8.0f,
+    int8_t occ_thresh = 50
+) {
+    const float dx = std::cos(ang);
+    const float dy = std::sin(ang);
+    const float eps = 1e-8f;
+
+    if (std::fabs(dx) < eps && std::fabs(dy) < eps) return max_range;
+
+    const float res = grid.resolution;
+    const float ox  = grid.origin_x;
+    const float oy  = grid.origin_y;
+
+    // Grid bbox in world coordinates (note: xmax/ymax are outer edge)
+    const float xmin = ox;
+    const float ymin = oy;
+    const float xmax = ox + grid.width  * res;
+    const float ymax = oy + grid.height * res;
+
+    // If start outside, compute entry point into bbox first
+    float t_enter = 0.0f, t_exit = 0.0f;
+    if (!rayIntersectAABB2D(x0, y0, dx, dy, xmin, xmax, ymin, ymax, t_enter, t_exit)) {
+        return max_range;
+    }
+
+    // Start point for traversal: just inside the box
+    float t0 = t_enter;
+    float sx = x0 + dx * t0;
+    float sy = y0 + dy * t0;
+
+    // Nudge forward a tiny bit to avoid landing exactly on boundary
+    sx += dx * 1e-4f;
+    sy += dy * 1e-4f;
+
+    // Convert start to cell
+    int cx = static_cast<int>(std::floor((sx - ox) / res));
+    int cy = static_cast<int>(std::floor((sy - oy) / res));
+
+    // Clamp to valid range (robustness)
+    cx = std::clamp(cx, 0, grid.width  - 1);
+    cy = std::clamp(cy, 0, grid.height - 1);
+
+    // Starting cell occupied => small range
+    if (isOccupiedCell(grid, cx, cy, occ_thresh)) {
+        return std::clamp(t0, 0.05f, max_range);
+    }
+
+    const int stepX = (dx > 0) ? 1 : -1;
+    const int stepY = (dy > 0) ? 1 : -1;
+
+    // Next boundary in world coordinates
+    const float nextBx = ox + ((dx > 0) ? (cx + 1) * res : cx * res);
+    const float nextBy = oy + ((dy > 0) ? (cy + 1) * res : cy * res);
+
+    float tMaxX = (std::fabs(dx) < eps) ? 1e30f : (nextBx - sx) / dx;
+    float tMaxY = (std::fabs(dy) < eps) ? 1e30f : (nextBy - sy) / dy;
+
+    const float tDeltaX = (std::fabs(dx) < eps) ? 1e30f : (res / std::fabs(dx));
+    const float tDeltaY = (std::fabs(dy) < eps) ? 1e30f : (res / std::fabs(dy));
+
+    // t is measured from (sx,sy). total distance from original is t0 + t.
+    float t = 0.0f;
+
+    while ((t0 + t) <= max_range) {
+        if (tMaxX < tMaxY) {
+            cx += stepX;
+            t  = tMaxX;
+            tMaxX += tDeltaX;
+        } else {
+            cy += stepY;
+            t  = tMaxY;
+            tMaxY += tDeltaY;
+        }
+
+        // Out of map => return distance to boundary (still within ray)
+        if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height) {
+            return std::clamp(t0 + t, 0.05f, max_range);
+        }
+
+        // Hit occupied cell
+        if (isOccupiedCell(grid, cx, cy, occ_thresh)) {
+            return std::clamp(t0 + t, 0.05f, max_range);
+        }
+    }
+
+    return max_range;
 }
 
 // =========================
@@ -260,12 +398,6 @@ inline void generateFakeCleaningLogFromFloorplanAssets(
     std::normal_distribution<float> n_imu (0.0f, 0.005f);
     std::normal_distribution<float> n_scan(0.0f, 0.02f);
     std::bernoulli_distribution slip_event(0.002);
-
-    // Map bounds in meters
-    const float xmin = grid.origin_x;
-    const float ymin = grid.origin_y;
-    const float xmax = grid.origin_x + grid.width  * grid.resolution;
-    const float ymax = grid.origin_y + grid.height * grid.resolution;
 
     auto stateAt = [&](double t_sec)->RobotState {
         if (t_sec < 1.0) return RobotState::selfcheck;
@@ -360,9 +492,11 @@ inline void generateFakeCleaningLogFromFloorplanAssets(
                 scan.angle_increment = static_cast<float>(2.0 * 3.1415926 / 360.0);
                 scan.beams.resize(360);
 
+                // Use occupancy grid raycast so scan aligns with walls (occupied cells)
                 for (int i = 0; i < 360; ++i) {
                     float ang = scan.angle_min + i * scan.angle_increment + true_pose.a;
-                    float d = rayToRectBoundary(true_pose.x, true_pose.y, ang, xmin, xmax, ymin, ymax);
+
+                    float d = raycastOccGridDDA(grid, true_pose.x, true_pose.y, ang, 8.0f, 50);
                     d += n_scan(rng);
                     scan.beams[i] = std::clamp(d, 0.05f, 8.0f);
                 }
