@@ -36,6 +36,30 @@ const btnFitMap = el('btnFitMap');
 const btnFitTraj = el('btnFitTraj');
 const btnResetView = el('btnResetView');
 
+// ---------------------- Measure UI (insert after ResetTraj, no HTML change) ----------------------
+const btnMeasure = (function(){
+  let b = el('btnMeasure');
+  if (!b && btnResetTraj && btnResetTraj.parentElement){
+    b = document.createElement('button');
+    b.id = 'btnMeasure';
+    b.type = 'button';
+    b.textContent = '测量';
+
+    // --- keep UI consistent with existing toolbar buttons ---
+    if (btnResetTraj.className) b.className = btnResetTraj.className;
+    // copy common attributes if your CSS relies on them
+    for (const k of ['aria-label', 'title', 'data-variant', 'data-size']){
+      const v = btnResetTraj.getAttribute(k);
+      if (v !== null) b.setAttribute(k, v);
+    }
+
+    const parent = btnResetTraj.parentElement;
+    if (btnResetTraj.nextSibling) parent.insertBefore(b, btnResetTraj.nextSibling);
+    else parent.appendChild(b);
+  }
+  return b;
+})();
+
 // UI: overlay accordion (layers / helpers / view). No impact to viewer logic.
 function initOverlayAccordion(){
   const headers = document.querySelectorAll('.viewer-overlay .acc-header');
@@ -71,6 +95,24 @@ let panState = { active:false, startX:0, startY:0, startOX:0, startOY:0 };
 let lastFrame = null;
 let trajPts = []; // appended while playing
 let currentTsNs = 0n;
+
+// ---------------------- Measure tool state ----------------------
+const measure = {
+  enabled: false,
+  a: null,       // {x,y} in world(m)
+  b: null,       // {x,y} in world(m)
+  dist_m: 0,
+};
+
+function setMeasureLabel(txt){}
+
+function clearMeasure(keepEnabled=true){
+  measure.a = null;
+  measure.b = null;
+  measure.dist_m = 0;
+}
+
+function updateMeasureDistanceLabel(){}
 
 // Trajectory-from-backend (prefix) for correct seek/drag rendering.
 let trajReq = { ac:null, lastMs:0 };
@@ -538,6 +580,61 @@ function drawRobot(frame){
   ctx.restore();
 }
 
+// ---------------------- Measure overlay drawing ----------------------
+function drawMeasureOverlay(){
+  if (!measure.enabled) return;
+  if (!measure.a) return;
+
+  const BLUE = '#2457ff'; // 与你机器人主体蓝色保持一致
+  const A = worldToScreen(measure.a.x, measure.a.y);
+
+  ctx.save();
+  ctx.lineWidth = 2;
+
+  // --- point A: blue circle ---
+  ctx.setLineDash([]);              // points are solid
+  ctx.strokeStyle = BLUE;
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'; // subtle fill for visibility
+  ctx.beginPath();
+  ctx.arc(A.x, A.y, 6, 0, Math.PI*2);
+  ctx.fill();
+  ctx.stroke();
+
+  if (!measure.b){
+    ctx.restore();
+    return;
+  }
+
+  const B = worldToScreen(measure.b.x, measure.b.y);
+
+  // --- point B: blue circle ---
+  ctx.beginPath();
+  ctx.arc(B.x, B.y, 6, 0, Math.PI*2);
+  ctx.fill();
+  ctx.stroke();
+
+  // --- segment AB: blue dashed line ---
+  ctx.strokeStyle = BLUE;
+  ctx.setLineDash([8, 6]); // dash pattern
+  ctx.beginPath();
+  ctx.moveTo(A.x, A.y);
+  ctx.lineTo(B.x, B.y);
+  ctx.stroke();
+
+  // --- label ---
+  ctx.setLineDash([]);
+  const mx = (A.x + B.x) * 0.5;
+  const my = (A.y + B.y) * 0.5;
+  const txt = `${measure.dist_m.toFixed(3)} m`;
+
+  ctx.font = '14px system-ui, sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = BLUE;
+  ctx.fillText(txt, mx + 8, my - 10);
+
+  ctx.restore();
+}
+
 function render(frame){
   if (!frame || frame.error) return;
   clear();
@@ -551,6 +648,9 @@ function render(frame){
   drawTrajectory();
   drawScan(frame);
   drawRobot(frame);
+
+  // measure overlay on top
+  drawMeasureOverlay();
 }
 
 // ---------- data refresh ----------
@@ -618,6 +718,20 @@ selSpeed.addEventListener('change', ()=>{
   speed = parseFloat(selSpeed.value);
   speedLabelEl.textContent = `x${speed}`;
 });
+
+// ---------------------- Measure button logic ----------------------
+if (btnMeasure){
+  btnMeasure.addEventListener('click', ()=>{
+    measure.enabled = !measure.enabled;
+    // reset points on toggle to avoid stale overlay
+    measure.a = null;
+    measure.b = null;
+    measure.dist_m = 0;
+    if (measure.enabled) setMeasureLabel('请选择点A...');
+    else setMeasureLabel('');
+    if (lastFrame) render(lastFrame);
+  });
+}
 
 // Screen recorder: record the entire screen (user selects monitor/window/tab), 20 Hz
 let recorder = null;
@@ -744,6 +858,10 @@ function zoomAtScreenPoint(factor, sx, sy){
 canvas.addEventListener('pointerdown', (e)=>{
   // left button drag pan
   if (e.button !== 0) return;
+
+  // If measuring, do NOT start pan (otherwise cannot reliably pick points)
+  if (measure.enabled) return;
+
   panState.active = true;
   panState.startX = e.clientX;
   panState.startY = e.clientY;
@@ -785,6 +903,60 @@ canvas.addEventListener('dblclick', ()=>{
   const b = computeBoundsFromMap() || computeBoundsFromTrajOrPose(lastFrame);
   fitCameraToBounds(b);
   if (lastFrame) render(lastFrame);
+});
+
+// ---------------------- Measure interactions on canvas ----------------------
+// Click to select points (only when measure.enabled). Use click to avoid interfering with wheel/drag logic.
+canvas.addEventListener('click', (e)=>{
+  if (!measure.enabled) return;
+
+  // Map presence is not strictly required for unit correctness (world is meters),
+  // but user asked "地图显示页面的测量工具" - keep it map-page oriented:
+  if (!mapCache && meta && meta.has_map) {
+    // if map exists but not loaded yet, ignore until loaded
+    return;
+  }
+
+  const rect = canvas.getBoundingClientRect();
+  const sx = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const sy = (e.clientY - rect.top) * (canvas.height / rect.height);
+  const w = screenToWorld(sx, sy);
+
+  // first click or restart
+  if (!measure.a || (measure.a && measure.b)){
+    measure.a = {x: w.x, y: w.y};
+    measure.b = null;
+    measure.dist_m = 0;
+    updateMeasureDistanceLabel();
+    if (lastFrame) render(lastFrame);
+    return;
+  }
+
+  // second click
+  measure.b = {x: w.x, y: w.y};
+  const dx = measure.b.x - measure.a.x;
+  const dy = measure.b.y - measure.a.y;
+  measure.dist_m = Math.hypot(dx, dy); // meters
+  updateMeasureDistanceLabel();
+  if (lastFrame) render(lastFrame);
+});
+
+// Right-click clears measurement but keeps mode
+canvas.addEventListener('contextmenu', (e)=>{
+  if (!measure.enabled) return;
+  e.preventDefault();
+  clearMeasure(true);
+  if (lastFrame) render(lastFrame);
+});
+
+// ESC exits measure mode and clears
+window.addEventListener('keydown', (e)=>{
+  if (e.key === 'Escape'){
+    if (!measure.enabled && !measure.a && !measure.b) return;
+    measure.enabled = false;
+    clearMeasure(false);
+    if (lastFrame) render(lastFrame);
+  }
 });
 
 // Overlay controls: re-render immediately
@@ -876,6 +1048,9 @@ function loop(){
   const b = computeBoundsFromMap() || computeBoundsFromTrajOrPose(lastFrame);
   fitCameraToBounds(b);
   if (lastFrame) render(lastFrame);
+
+  // init measure label state
+  clearMeasure(false);
 
   requestAnimationFrame(loop);
 })();
