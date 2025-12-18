@@ -84,12 +84,31 @@ let requestSeq = 0;
 // Camera (world -> screen):
 //  sx = offsetX + wx*scale
 //  sy = offsetY - wy*scale  (world Y up)
+//
+// Upgrade: add rotation (rot, rad) and keep "world Y up" convention.
+//  world -> camera: [rx; ry] = R(rot) * [wx; wy]
+//  sx = offsetX + rx*scale
+//  sy = offsetY - ry*scale
 let cam = {
   scale: 80.0,   // px per meter
   offsetX: 0.0,  // px
   offsetY: 0.0,  // px
+  rot: 0.0,      // rad, +CCW (view rotation)
 };
-let panState = { active:false, startX:0, startY:0, startOX:0, startOY:0 };
+
+// Pan (LMB drag) / Rotate (Shift + LMB drag)
+let panState = {
+  active:false,
+  startX:0, startY:0,
+  startOX:0, startOY:0,
+  // rotate mode
+  mode:'pan',         // 'pan' | 'rot'
+  startRot:0,
+  // rotate around cursor anchor
+  anchorSX:0,
+  anchorSY:0,
+  anchorW:null,       // {x,y} in world(m)
+};
 
 // derived state
 let lastFrame = null;
@@ -247,17 +266,52 @@ function clear(){
 }
 
 function screenToWorld(sx, sy){
+  // Upgrade: support rotation (inverse transform).
+  // screen -> camera (meters)
+  const dx = (sx - cam.offsetX) / cam.scale;
+  const dy = (cam.offsetY - sy) / cam.scale;
+
+  // camera -> world (inverse rotate)
+  const c = Math.cos(cam.rot);
+  const s = Math.sin(cam.rot);
+
   return {
-    x: (sx - cam.offsetX) / cam.scale,
-    y: (cam.offsetY - sy) / cam.scale,
+    x:  c * dx + s * dy,
+    y: -s * dx + c * dy,
   };
 }
 
 function worldToScreen(wx, wy){
+  // Upgrade: support rotation (forward transform).
+  const c = Math.cos(cam.rot);
+  const s = Math.sin(cam.rot);
+
+  // world -> camera (rotate)
+  const rx = c * wx - s * wy;
+  const ry = s * wx + c * wy;
+
   return {
-    x: cam.offsetX + wx*cam.scale,
-    y: cam.offsetY - wy*cam.scale,
+    x: cam.offsetX + rx*cam.scale,
+    y: cam.offsetY - ry*cam.scale,
   };
+}
+
+// Helper: convert browser client (CSS pixels) -> canvas pixel coords
+function canvasClientToCanvasPx(e){
+  const rect = canvas.getBoundingClientRect();
+  const sx = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const sy = (e.clientY - rect.top) * (canvas.height / rect.height);
+  return {sx, sy};
+}
+
+// Helper: keep a world point fixed under a screen pixel (used by zoom + rotate-around-cursor)
+function setCamOffsetForAnchor(wx, wy, sx, sy){
+  const c = Math.cos(cam.rot);
+  const s = Math.sin(cam.rot);
+  const rx = c * wx - s * wy;
+  const ry = s * wx + c * wy;
+  cam.offsetX = sx - rx * cam.scale;
+  cam.offsetY = sy + ry * cam.scale;
 }
 
 function pickNiceStepMeters(targetMeters){
@@ -312,15 +366,19 @@ function drawRvizGrid(){
   ctx.lineWidth = 1;
 
   // minor
+  // NOTE: after adding rotation, grid lines must be drawn by endpoints in world,
+  // not by assuming screen-aligned X/Y.
   if (showMinor){
     ctx.strokeStyle = 'rgba(0,0,0,0.08)';
     for (let x = startXMinor; x <= maxx; x += minorMeters){
-      const sx = worldToScreen(x, 0).x;
-      ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, h); ctx.stroke();
+      const A = worldToScreen(x, miny);
+      const B = worldToScreen(x, maxy);
+      ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke();
     }
     for (let y = startYMinor; y <= maxy; y += minorMeters){
-      const sy = worldToScreen(0, y).y;
-      ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(w, sy); ctx.stroke();
+      const A = worldToScreen(minx, y);
+      const B = worldToScreen(maxx, y);
+      ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke();
     }
   }
 
@@ -329,28 +387,31 @@ function drawRvizGrid(){
   const startYMajor = Math.floor(miny / majorMeters) * majorMeters;
   ctx.strokeStyle = 'rgba(0,0,0,0.18)';
   for (let x = startXMajor; x <= maxx; x += majorMeters){
-    const sx = worldToScreen(x, 0).x;
-    ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, h); ctx.stroke();
+    const A = worldToScreen(x, miny);
+    const B = worldToScreen(x, maxy);
+    ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke();
   }
   for (let y = startYMajor; y <= maxy; y += majorMeters){
-    const sy = worldToScreen(0, y).y;
-    ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(w, sy); ctx.stroke();
+    const A = worldToScreen(minx, y);
+    const B = worldToScreen(maxx, y);
+    ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke();
   }
 
   // coordinate labels on major grid (lightweight, edges only)
+  // NOTE: under rotation, "edges only" is not as meaningful; keep it lightweight and correct numerically.
   ctx.fillStyle = 'rgba(0,0,0,0.55)';
   ctx.font = '12px system-ui, sans-serif';
   ctx.textBaseline = 'top';
   for (let x = startXMajor; x <= maxx; x += majorMeters){
-    const sx = worldToScreen(x, 0).x;
-    if (sx < 0 || sx > w) continue;
-    ctx.fillText(`${x.toFixed(1)}m`, sx + 2, 2);
+    const sp = worldToScreen(x, maxy);
+    if (sp.x < 0 || sp.x > w || sp.y < 0 || sp.y > h) continue;
+    ctx.fillText(`${x.toFixed(1)}m`, sp.x + 2, sp.y + 2);
   }
   ctx.textBaseline = 'bottom';
   for (let y = startYMajor; y <= maxy; y += majorMeters){
-    const sy = worldToScreen(0, y).y;
-    if (sy < 0 || sy > h) continue;
-    ctx.fillText(`${y.toFixed(1)}m`, 2, sy - 2);
+    const sp = worldToScreen(minx, y);
+    if (sp.x < 0 || sp.x > w || sp.y < 0 || sp.y > h) continue;
+    ctx.fillText(`${y.toFixed(1)}m`, sp.x + 2, sp.y - 2);
   }
 
   ctx.restore();
@@ -358,23 +419,30 @@ function drawRvizGrid(){
 
 function drawAxes(){
   if (!ckAxes || !ckAxes.checked) return;
-  const w = canvas.width, h = canvas.height;
+
+  // NOTE: after adding rotation, axes should represent WORLD axes, not screen axes.
   const o = worldToScreen(0,0);
+  const L = 5.0; // meters
+  const xEnd = worldToScreen(L, 0);
+  const yEnd = worldToScreen(0, L);
+
   ctx.save();
   ctx.lineWidth = 2;
 
   // X axis (red)
   ctx.strokeStyle = '#d62728';
-  ctx.beginPath(); ctx.moveTo(0, o.y); ctx.lineTo(w, o.y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(o.x, o.y); ctx.lineTo(xEnd.x, xEnd.y); ctx.stroke();
+
   // Y axis (green)
   ctx.strokeStyle = '#2ca02c';
-  ctx.beginPath(); ctx.moveTo(o.x, 0); ctx.lineTo(o.x, h); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(o.x, o.y); ctx.lineTo(yEnd.x, yEnd.y); ctx.stroke();
 
   ctx.fillStyle = '#d62728';
   ctx.font = 'bold 14px system-ui, sans-serif';
-  ctx.fillText('X', Math.min(w-18, o.x + 6), Math.min(h-6, o.y + 18));
+  ctx.fillText('X', xEnd.x + 6, xEnd.y + 6);
+
   ctx.fillStyle = '#2ca02c';
-  ctx.fillText('Y', Math.min(w-18, o.x + 18), Math.max(16, o.y - 6));
+  ctx.fillText('Y', yEnd.x + 6, yEnd.y + 6);
 
   ctx.restore();
 }
@@ -481,16 +549,11 @@ function drawMap(){
   }
 
   // compute screen rect of map bounds
-  const x0 = worldToScreen(ox, oy + h*res).x;
-  const y0 = worldToScreen(ox, oy + h*res).y; // top-left in screen
-  const x1 = worldToScreen(ox + w*res, oy).x;
-  const y1 = worldToScreen(ox + w*res, oy).y;
-  const sw = x1 - x0;
-  const sh = y1 - y0;
-
-  // draw with nearest-neighbor style
+  // NOTE: with rotation, the map is no longer screen-axis-aligned.
+  // We draw it using canvas transforms consistent with worldToScreen().
   ctx.save();
   ctx.imageSmoothingEnabled = false;
+
   // putImageData requires 1:1, so draw via offscreen canvas
   if (!mapCache._can){
     const c = document.createElement('canvas');
@@ -499,7 +562,24 @@ function drawMap(){
     cctx.putImageData(mapCache._img, 0, 0);
     mapCache._can = c;
   }
-  ctx.drawImage(mapCache._can, x0, y0, sw, sh);
+
+  // Draw in a way that exactly matches:
+  //  sx = offsetX + (c*wx - s*wy)*scale
+  //  sy = offsetY - (s*wx + c*wy)*scale
+  ctx.translate(cam.offsetX, cam.offsetY);
+  ctx.scale(cam.scale, -cam.scale);
+  ctx.rotate(cam.rot);
+
+  // now unit is "meter" in world, y-up.
+  // map origin in meters:
+  ctx.translate(ox, oy);
+  // convert meters -> cells:
+  ctx.scale(res, res);
+
+  // canvas image space is y-down; convert to y-up in this local space
+  ctx.scale(1, -1);
+  ctx.drawImage(mapCache._can, 0, -h, w, h);
+
   ctx.restore();
 }
 
@@ -560,7 +640,8 @@ function drawRobot(frame){
 
   ctx.save();
   ctx.translate(x, y);
-  ctx.rotate(-yaw); // screen y is down
+  // IMPORTANT: include view rotation so robot heading is correct after rotating the view
+  ctx.rotate(-(yaw + cam.rot)); // screen y is down
 
   // triangle robot icon
   ctx.fillStyle = '#2457ff';
@@ -849,39 +930,70 @@ function clampScale(s){
 
 function zoomAtScreenPoint(factor, sx, sy){
   // Keep the same world point under cursor.
-  const world = screenToWorld(sx, sy);
+  // Upgrade: with rotation, still keep anchor via setCamOffsetForAnchor().
+  const w = screenToWorld(sx, sy);
   cam.scale = clampScale(cam.scale * factor);
-  cam.offsetX = sx - world.x * cam.scale;
-  cam.offsetY = sy + world.y * cam.scale;
+  setCamOffsetForAnchor(w.x, w.y, sx, sy);
 }
 
 canvas.addEventListener('pointerdown', (e)=>{
-  // left button drag pan
+  // left button drag pan OR (Shift+left) rotate
   if (e.button !== 0) return;
 
   // If measuring, do NOT start pan (otherwise cannot reliably pick points)
   if (measure.enabled) return;
 
+  // Shift+LMB drag => rotate-around-cursor (do not change original pan/zoom behavior)
   panState.active = true;
   panState.startX = e.clientX;
   panState.startY = e.clientY;
-  panState.startOX = cam.offsetX;
-  panState.startOY = cam.offsetY;
+
+  if (e.shiftKey){
+    panState.mode = 'rot';
+    panState.startRot = cam.rot;
+
+    // Anchor: rotate around cursor point (press-time)
+    const {sx, sy} = canvasClientToCanvasPx(e);
+    panState.anchorSX = sx;
+    panState.anchorSY = sy;
+    panState.anchorW = screenToWorld(sx, sy);
+  } else {
+    panState.mode = 'pan';
+    panState.startOX = cam.offsetX;
+    panState.startOY = cam.offsetY;
+  }
+
   canvas.setPointerCapture(e.pointerId);
 });
 
 canvas.addEventListener('pointermove', (e)=>{
   if (!panState.active) return;
+
   const dx = e.clientX - panState.startX;
   const dy = e.clientY - panState.startY;
-  cam.offsetX = panState.startOX + dx;
-  cam.offsetY = panState.startOY + dy;
+
+  if (panState.mode === 'pan'){
+    cam.offsetX = panState.startOX + dx;
+    cam.offsetY = panState.startOY + dy;
+  } else if (panState.mode === 'rot'){
+    // Rotate sensitivity: rad per pixel. Tune if needed.
+    const k = 0.005;
+    cam.rot = panState.startRot + dx * k;
+
+    // Keep the same world point under the cursor (rotate-around-cursor)
+    if (panState.anchorW){
+      setCamOffsetForAnchor(panState.anchorW.x, panState.anchorW.y, panState.anchorSX, panState.anchorSY);
+    }
+  }
+
   if (lastFrame) render(lastFrame);
 });
 
 function endPan(e){
   if (!panState.active) return;
   panState.active = false;
+  panState.mode = 'pan';
+  panState.anchorW = null;
   try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
 }
 canvas.addEventListener('pointerup', endPan);
@@ -981,6 +1093,7 @@ btnResetView?.addEventListener('click', ()=>{
   cam.scale = 80.0;
   cam.offsetX = canvas.width/2;
   cam.offsetY = canvas.height/2;
+  cam.rot = 0.0; // reset rotation
   if (lastFrame) render(lastFrame);
 });
 
@@ -1034,6 +1147,7 @@ function loop(){
   cam.scale = 80.0;
   cam.offsetX = canvas.width/2;
   cam.offsetY = canvas.height/2;
+  cam.rot = 0.0;
 
   await ensureMap(tsFromSec(sec));
   await refreshTrajPrefix(tsFromSec(sec), true);
