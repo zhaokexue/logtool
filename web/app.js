@@ -15,6 +15,24 @@ const txtTimeEl = el('txtTime');
 const txtStateEl = el('txtState');
 const speedLabelEl = el('speedLabel');
 
+// extra status text fields in top toolbar (optional)
+const txtExceptionEl = el('txtException');
+const txtMotionStateEl = el('txtMotionState');
+
+// right info panel (optional; keep null-safe)
+const ctrlVelEl = el('ctrl_vel');
+const odoPoseEl2 = el('odo_pose');
+const odoFusePoseEl2 = el('odo_fuse_pose');
+const robotPoseEl = el('robot_pose');
+const imuPryYawVelEl = el('imu_pry_yawvel');
+const imuAccEl = el('imu_acc');
+const bumperWheelEl = el('bumper_wheel');
+const irSonarEl = el('ir_sonar');
+const cliffIrEl = el('cliff_ir');
+const slipMergeEl = el('slip_merge');
+const dockMergeEl = el('dock_merge');
+const batteryVoltageEl = el('battery_voltage');
+
 const btnPlay = el('btnPlay');
 const btnRecord = el('btnRecord');
 const btnResetTraj = el('btnResetTraj');
@@ -174,6 +192,24 @@ function fmt2(v){
   return String(v);
 }
 
+// Tolerant getter for runtime status fields (won't break old backend/logs)
+function getStatusObj(frame){
+  if (!frame) return null;
+  return frame.status || frame.runtime || frame.rt || frame.telemetry || null;
+}
+
+function bool01(v){
+  if (v === null || v === undefined) return '-';
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  if (typeof v === 'number') return v ? 1 : 0;
+  if (typeof v === 'string'){
+    const t = v.trim().toLowerCase();
+    if (t === '' || t === '0' || t === 'false' || t === 'no') return 0;
+    return 1;
+  }
+  return '-';
+}
+
 async function getMeta(){
   const r = await fetch('/api/meta');
   return await r.json();
@@ -231,33 +267,168 @@ async function ensureMap(tsNs){
 
 function setInfo(frame){
   if (!frame || frame.error) return;
-  poseTsEl.textContent = frame.pose_ts ?? '-';
-  scanTsEl.textContent = frame.scan_ts ?? '-';
-  mapTsEl.textContent = frame.map_ts ?? (mapCache ? mapCache.ts : '-');
+  // NOTE: some panels/fields may be removed from HTML; keep all updates null-safe.
+  if (poseTsEl) poseTsEl.textContent = frame.pose_ts ?? '-';
+  if (scanTsEl) scanTsEl.textContent = frame.scan_ts ?? '-';
+  if (mapTsEl) mapTsEl.textContent = frame.map_ts ?? (mapCache ? mapCache.ts : '-');
 
-  poseTxtEl.textContent = `(${frame.pose.x.toFixed(2)}, ${frame.pose.y.toFixed(2)}, ${frame.pose.yaw.toFixed(2)})`;
+  if (poseTxtEl && frame.pose){
+    poseTxtEl.textContent = `(${frame.pose.x.toFixed(2)}, ${frame.pose.y.toFixed(2)}, ${frame.pose.yaw.toFixed(2)})`;
+  }
+
+  // Robot pose (per new info panel)
+  if (robotPoseEl && frame.pose){
+    robotPoseEl.textContent = `(${frame.pose.x.toFixed(2)}, ${frame.pose.y.toFixed(2)}, ${frame.pose.yaw.toFixed(2)})`;
+  }
 
   if (frame.imu){
-    imuPitchEl.textContent = fmt2(frame.imu.pitch);
-    imuRollEl.textContent = fmt2(frame.imu.roll);
-    imuYawEl.textContent = fmt2(frame.imu.yaw);
+    if (imuPitchEl) imuPitchEl.textContent = fmt2(frame.imu.pitch);
+    if (imuRollEl) imuRollEl.textContent = fmt2(frame.imu.roll);
+    if (imuYawEl) imuYawEl.textContent = fmt2(frame.imu.yaw);
   } else {
-    imuPitchEl.textContent = imuRollEl.textContent = imuYawEl.textContent = '-';
+    if (imuPitchEl) imuPitchEl.textContent = '-';
+    if (imuRollEl) imuRollEl.textContent = '-';
+    if (imuYawEl) imuYawEl.textContent = '-';
   }
 
   if (frame.odom){
     const p = frame.odom;
-    odomEl.textContent = `(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.yaw.toFixed(2)})`;
+    if (odomEl) odomEl.textContent = `(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.yaw.toFixed(2)})`;
   } else {
-    odomEl.textContent = '-';
+    if (odomEl) odomEl.textContent = '-';
   }
 
-  slipEl.textContent = (frame.slip !== null && frame.slip !== undefined) ? String(frame.slip) : '-';
+  if (slipEl) slipEl.textContent = (frame.slip !== null && frame.slip !== undefined) ? String(frame.slip) : '-';
 
-  txtStateEl.textContent = frame.state ?? '-';
+  if (txtStateEl) txtStateEl.textContent = frame.state ?? '-';
 
   // time display
-  txtTimeEl.textContent = frame.time_text ?? '-';
+  if (txtTimeEl) txtTimeEl.textContent = frame.time_text ?? '-';
+
+  // extra status text fields (optional)
+  if (txtExceptionEl) txtExceptionEl.textContent = (frame.exception !== null && frame.exception !== undefined) ? String(frame.exception) : '-';
+  if (txtMotionStateEl) txtMotionStateEl.textContent = (frame.motion_state !== null && frame.motion_state !== undefined) ? String(frame.motion_state) : '-';
+
+  // New info panel fields: order & grouping per UI spec
+  const s = getStatusObj(frame);
+
+  // ctrl vel
+  if (ctrlVelEl){
+    if (s){
+      const v = (s.ctrl_v ?? s.ctrl_vel_v ?? s.v);
+      const w = (s.ctrl_w ?? s.ctrl_vel_w ?? s.w);
+      ctrlVelEl.textContent = `(${fmt2(v)}, ${fmt2(w)})`;
+    } else {
+      ctrlVelEl.textContent = '-';
+    }
+  }
+
+  // odo poses
+  if (odoPoseEl2){
+    if (s){
+      const x = (s.odo_x ?? s.odo_pose_x ?? s.odoX);
+      const y = (s.odo_y ?? s.odo_pose_y ?? s.odoY);
+      const p = (s.odo_phi ?? s.odo_pose_phi ?? s.odoPhi);
+      odoPoseEl2.textContent = `(${fmt2(x)}, ${fmt2(y)}, ${fmt2(p)})`;
+    } else {
+      odoPoseEl2.textContent = '-';
+    }
+  }
+
+  if (odoFusePoseEl2){
+    if (s){
+      const x = (s.fuse_x ?? s.odo_imu_fuse_x ?? s.fuseX);
+      const y = (s.fuse_y ?? s.odo_imu_fuse_y ?? s.fuseY);
+      const p = (s.fuse_phi ?? s.odo_imu_fuse_phi ?? s.fusePhi);
+      odoFusePoseEl2.textContent = `(${fmt2(x)}, ${fmt2(y)}, ${fmt2(p)})`;
+    } else {
+      odoFusePoseEl2.textContent = '-';
+    }
+  }
+
+  // IMU combined: pitch/roll/yaw/yaw_vel
+  if (imuPryYawVelEl){
+    const yawv = s ? (s.imu_yaw_vel ?? s.yaw_vel ?? s.gyro_z) : null;
+    if (frame.imu){
+      imuPryYawVelEl.textContent = `${fmt2(frame.imu.pitch)}, ${fmt2(frame.imu.roll)}, ${fmt2(frame.imu.yaw)}, ${fmt2(yawv)}`;
+    } else {
+      imuPryYawVelEl.textContent = '-';
+    }
+  }
+
+  // IMU acc combined
+  if (imuAccEl){
+    if (s){
+      const ax = (s.imu_acc_x ?? s.acc_x ?? s.ax);
+      const ay = (s.imu_acc_y ?? s.acc_y ?? s.ay);
+      const az = (s.imu_acc_z ?? s.acc_z ?? s.az);
+      imuAccEl.textContent = `${fmt2(ax)}, ${fmt2(ay)}, ${fmt2(az)}`;
+    } else {
+      imuAccEl.textContent = '-';
+    }
+  }
+
+  // Bumper / Wheel_up
+  if (bumperWheelEl){
+    if (s){
+      const b = `B(${bool01(s.left_bumper)},${bool01(s.right_bumper)})`;
+      const w = `W(${bool01(s.left_wheel_up)},${bool01(s.right_wheel_up)})`;
+      bumperWheelEl.textContent = `${b}  ,  ${w}`;
+    } else {
+      bumperWheelEl.textContent = '-';
+    }
+  }
+
+  // Right_IR / Sonar
+  if (irSonarEl){
+    if (s){
+      const ir = `IR(${bool01(s.right_ir)})`;
+      const so = `S(${fmt2(s.sonar)})`;
+      irSonarEl.textContent = `${ir}  ,  ${so}`;
+    } else {
+      irSonarEl.textContent = '-';
+    }
+  }
+
+  // Cliff_IR(LR,LF,RF,RR)
+  if (cliffIrEl){
+    if (s){
+      cliffIrEl.textContent = `(${bool01(s.cliff_lr)}, ${bool01(s.cliff_lf)}, ${bool01(s.cliff_rf)}, ${bool01(s.cliff_rr)})`;
+    } else {
+      cliffIrEl.textContent = '-';
+    }
+  }
+
+  // Line_slip / Rotate_slip
+  if (slipMergeEl){
+    if (s){
+      const ls = `L(${bool01(s.line_slip_fwd)},${bool01(s.line_slip_back)})`;
+      const rs = `R(${bool01(s.rotate_slip_cw)},${bool01(s.rotate_slip_ccw)})`;
+      slipMergeEl.textContent = `${ls}  ,  ${rs}`;
+    } else {
+      slipMergeEl.textContent = '-';
+    }
+  }
+
+  // Dock_IR / Dock_clip_state
+  if (dockMergeEl){
+    if (s){
+      const d = `D(${bool01(s.dock_ir1)},${bool01(s.dock_ir2)},${bool01(s.dock_ir3)},${bool01(s.dock_ir4)})`;
+      const c = `C(${bool01(s.dock_clip_state)})`;
+      dockMergeEl.textContent = `${d}  ,  ${c}`;
+    } else {
+      dockMergeEl.textContent = '-';
+    }
+  }
+
+  // Battery_voltage
+  if (batteryVoltageEl){
+    if (s){
+      batteryVoltageEl.textContent = fmt2(s.battery_voltage ?? s.battery_v);
+    } else {
+      batteryVoltageEl.textContent = '-';
+    }
+  }
 }
 
 // ---------- rendering ----------

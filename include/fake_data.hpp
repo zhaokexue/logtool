@@ -376,6 +376,7 @@ inline void generateFakeCleaningLogFromFloorplanAssets(
     const uint64_t hz_imu   = 50;
     const uint64_t hz_odom  = 50;
     const uint64_t hz_slip  = 20;
+    const uint64_t hz_status= 20;
     const uint64_t hz_map   = 1;
     const uint64_t hz_scan  = 5;
 
@@ -398,6 +399,10 @@ inline void generateFakeCleaningLogFromFloorplanAssets(
     std::normal_distribution<float> n_imu (0.0f, 0.005f);
     std::normal_distribution<float> n_scan(0.0f, 0.02f);
     std::bernoulli_distribution slip_event(0.002);
+    std::bernoulli_distribution bump_event(0.003);
+    std::bernoulli_distribution wheelup_event(0.0008);
+    std::bernoulli_distribution cliff_event(0.0012);
+    std::bernoulli_distribution ir_event(0.01);
 
     auto stateAt = [&](double t_sec)->RobotState {
         if (t_sec < 1.0) return RobotState::selfcheck;
@@ -413,6 +418,7 @@ inline void generateFakeCleaningLogFromFloorplanAssets(
         {TYPE_IMU,   periodNsFromHz(hz_imu),   t0},
         {TYPE_ODOM,  periodNsFromHz(hz_odom),  t0},
         {TYPE_SLIP,  periodNsFromHz(hz_slip),  t0},
+        {TYPE_STATUS,periodNsFromHz(hz_status),t0},
         {TYPE_MAP,   periodNsFromHz(hz_map),   t0},
         {TYPE_SCAN,  periodNsFromHz(hz_scan),  t0},
     };
@@ -479,6 +485,68 @@ inline void generateFakeCleaningLogFromFloorplanAssets(
                 sl.line_slip = e;
                 sl.rotate_slip = e && (std::fabs(std::sin(true_pose.a)) > 0.5f);
                 rec = pushRecordData(TYPE_SLIP, sl, ts);
+                break;
+            }
+            case TYPE_STATUS: {
+                RobotStatus st{};
+
+                // simple synthetic status pattern (deterministic enough for demo)
+                // exception / motion_state are integer codes
+                st.exception = (bump_event(rng) ? 2u : 0u); // 0: none, 2: bump (demo)
+                st.motion_state = (t_sec < 1.0 ? 0u : (t_sec < duration_sec - 2.0 ? 1u : 2u)); // 0:init 1:run 2:stop
+
+                st.left_bumper  = bump_event(rng);
+                st.right_bumper = bump_event(rng);
+                st.left_wheel_up  = wheelup_event(rng);
+                st.right_wheel_up = wheelup_event(rng);
+
+                st.right_ir = ir_event(rng);
+
+                // approximate commanded velocity from true pose delta
+                float dt = float(it->period_ns) / 1e9f;
+                float dx = float(true_pose.x - last_true.x);
+                float dy = float(true_pose.y - last_true.y);
+                float ds = std::sqrt(dx*dx + dy*dy);
+                float da = float(true_pose.a - last_true.a);
+                st.ctrl_v = (dt > 1e-6f) ? (ds / dt) : 0.0f;
+                st.ctrl_w = (dt > 1e-6f) ? (da / dt) : 0.0f;
+
+                // cliff
+                st.cliff_lr = cliff_event(rng);
+                st.cliff_lf = cliff_event(rng);
+                st.cliff_rf = cliff_event(rng);
+                st.cliff_rr = cliff_event(rng);
+
+                // line slip finer breakdown (demo)
+                st.line_slip_fwd  = slip_event(rng);
+                st.line_slip_back = slip_event(rng);
+
+                // sonar distance: fluctuate within 0.2~2.5m
+                st.sonar = 1.2f + 0.8f * std::sin(float(t_sec) * 0.8f);
+
+                // rotate slip
+                st.rotate_slip_cw  = slip_event(rng);
+                st.rotate_slip_ccw = slip_event(rng);
+
+                // imu derived
+                st.imu_yaw_vel = st.ctrl_w + n_imu(rng) * 0.2f;
+                st.imu_acc_x = n_imu(rng) * 2.0f;
+                st.imu_acc_y = n_imu(rng) * 2.0f;
+                st.imu_acc_z = 9.8f + n_imu(rng) * 1.5f;
+
+                // docking: IR becomes active near end
+                bool near_dock = (t_sec > duration_sec - 1.5);
+                st.dock_ir1 = near_dock && ir_event(rng);
+                st.dock_ir2 = near_dock && ir_event(rng);
+                st.dock_ir3 = near_dock && ir_event(rng);
+                st.dock_ir4 = near_dock && ir_event(rng);
+                st.dock_clip_state = (t_sec > duration_sec - 0.8);
+
+                // battery: 16.8V -> 15.0V linearly
+                float alpha = float(t_sec / duration_sec);
+                st.battery_voltage = 16.8f - alpha * 1.8f;
+
+                rec = pushRecordData(TYPE_STATUS, st, ts);
                 break;
             }
             case TYPE_MAP: {

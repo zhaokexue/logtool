@@ -206,6 +206,7 @@ static std::string makeMetaJson(const IndexDB& db) {
     const bool has_odom = db.by_type.count(TYPE_ODOM) && !db.by_type.at(TYPE_ODOM).empty();
     const bool has_slip = db.by_type.count(TYPE_SLIP) && !db.by_type.at(TYPE_SLIP).empty();
     const bool has_state= db.by_type.count(TYPE_STATE)&& !db.by_type.at(TYPE_STATE).empty();
+    const bool has_status= db.by_type.count(TYPE_STATUS)&& !db.by_type.at(TYPE_STATUS).empty();
 
     uint64_t map_latest_ts = 0;
     if (has_map) map_latest_ts = db.by_type.at(TYPE_MAP).back().timestamp_ns;
@@ -219,6 +220,7 @@ static std::string makeMetaJson(const IndexDB& db) {
         "\"has_odom\":" + std::string(has_odom ? "true" : "false") + "," 
         "\"has_slip\":" + std::string(has_slip ? "true" : "false") + "," 
         "\"has_state\":" + std::string(has_state ? "true" : "false") + "," 
+        "\"has_status\":" + std::string(has_status ? "true" : "false") + "," 
         "\"map_latest_ts\":" + std::to_string(map_latest_ts) +
     "}";
 }
@@ -277,11 +279,12 @@ static std::string makeFrameJson(uint64_t target_ts, const IndexDB& db, LogReade
     }
 
     // optional telemetry
-    bool has_imu = false, has_odom = false, has_slip = false, has_state = false;
+    bool has_imu = false, has_odom = false, has_slip = false, has_state = false, has_status = false;
     Imu imu{};
     Odom odom{};
     Slip slip{};
     RobotState state = RobotState::selfcheck;
+    RobotStatus status{};
     uint64_t map_ts = 0;
 
     if (const IndexItem* ii = db.nearest(TYPE_IMU, pose_ts)) {
@@ -303,6 +306,11 @@ static std::string makeFrameJson(uint64_t target_ts, const IndexDB& db, LogReade
         Record rst = reader.readAt(ist->offset);
         state = parseRecordPayload<RobotState>(rst);
         has_state = true;
+    }
+    if (const IndexItem* iss2 = db.nearest(TYPE_STATUS, pose_ts)) {
+        Record rs2 = reader.readAt(iss2->offset);
+        status = parseRecordPayload<RobotStatus>(rs2);
+        has_status = true;
     }
     if (const IndexItem* im = db.nearest(TYPE_MAP, pose_ts)) {
         map_ts = im->timestamp_ns;
@@ -333,13 +341,25 @@ static std::string makeFrameJson(uint64_t target_ts, const IndexDB& db, LogReade
     }
 
     if (has_odom) {
-        // UI shows one odom; default to fuse_pose.
+        // Backward-compatible "odom" keeps fuse_pose. Also expose raw/fuse explicitly.
         j += "\"odom\":{";
+        j += "\"x\":" + std::to_string(odom.fuse_pose.x) + ",";
+        j += "\"y\":" + std::to_string(odom.fuse_pose.y) + ",";
+        j += "\"yaw\":" + std::to_string(odom.fuse_pose.angle) + "},";
+
+        j += "\"odom_raw\":{";
+        j += "\"x\":" + std::to_string(odom.raw_pose.x) + ",";
+        j += "\"y\":" + std::to_string(odom.raw_pose.y) + ",";
+        j += "\"yaw\":" + std::to_string(odom.raw_pose.angle) + "},";
+
+        j += "\"odom_fuse\":{";
         j += "\"x\":" + std::to_string(odom.fuse_pose.x) + ",";
         j += "\"y\":" + std::to_string(odom.fuse_pose.y) + ",";
         j += "\"yaw\":" + std::to_string(odom.fuse_pose.angle) + "},";
     } else {
         j += "\"odom\":null,";
+        j += "\"odom_raw\":null,";
+        j += "\"odom_fuse\":null,";
     }
 
     if (has_slip) {
@@ -353,6 +373,43 @@ static std::string makeFrameJson(uint64_t target_ts, const IndexDB& db, LogReade
         j += "\"state\":\"" + stateToText(static_cast<uint32_t>(state)) + "\",";
     } else {
         j += "\"state\":null,";
+    }
+
+    if (has_status) {
+        j += "\"exception\":" + std::to_string(status.exception) + ",";
+        j += "\"motion_state\":" + std::to_string(status.motion_state) + ",";
+        j += "\"status\":{";
+        j += "\"left_bumper\":" + std::string(status.left_bumper ? "true" : "false") + ",";
+        j += "\"right_bumper\":" + std::string(status.right_bumper ? "true" : "false") + ",";
+        j += "\"left_wheel_up\":" + std::string(status.left_wheel_up ? "true" : "false") + ",";
+        j += "\"right_wheel_up\":" + std::string(status.right_wheel_up ? "true" : "false") + ",";
+        j += "\"right_ir\":" + std::string(status.right_ir ? "true" : "false") + ",";
+        j += "\"ctrl_v\":" + std::to_string(status.ctrl_v) + ",";
+        j += "\"ctrl_w\":" + std::to_string(status.ctrl_w) + ",";
+        j += "\"cliff_lr\":" + std::string(status.cliff_lr ? "true" : "false") + ",";
+        j += "\"cliff_lf\":" + std::string(status.cliff_lf ? "true" : "false") + ",";
+        j += "\"cliff_rf\":" + std::string(status.cliff_rf ? "true" : "false") + ",";
+        j += "\"cliff_rr\":" + std::string(status.cliff_rr ? "true" : "false") + ",";
+        j += "\"line_slip_fwd\":" + std::string(status.line_slip_fwd ? "true" : "false") + ",";
+        j += "\"line_slip_back\":" + std::string(status.line_slip_back ? "true" : "false") + ",";
+        j += "\"sonar\":" + std::to_string(status.sonar) + ",";
+        j += "\"rotate_slip_cw\":" + std::string(status.rotate_slip_cw ? "true" : "false") + ",";
+        j += "\"rotate_slip_ccw\":" + std::string(status.rotate_slip_ccw ? "true" : "false") + ",";
+        j += "\"imu_yaw_vel\":" + std::to_string(status.imu_yaw_vel) + ",";
+        j += "\"imu_acc_x\":" + std::to_string(status.imu_acc_x) + ",";
+        j += "\"imu_acc_y\":" + std::to_string(status.imu_acc_y) + ",";
+        j += "\"imu_acc_z\":" + std::to_string(status.imu_acc_z) + ",";
+        j += "\"dock_ir1\":" + std::string(status.dock_ir1 ? "true" : "false") + ",";
+        j += "\"dock_ir2\":" + std::string(status.dock_ir2 ? "true" : "false") + ",";
+        j += "\"dock_ir3\":" + std::string(status.dock_ir3 ? "true" : "false") + ",";
+        j += "\"dock_ir4\":" + std::string(status.dock_ir4 ? "true" : "false") + ",";
+        j += "\"dock_clip_state\":" + std::string(status.dock_clip_state ? "true" : "false") + ",";
+        j += "\"battery_voltage\":" + std::to_string(status.battery_voltage);
+        j += "},";
+    } else {
+        j += "\"exception\":null,";
+        j += "\"motion_state\":null,";
+        j += "\"status\":null,";
     }
 
     // points in robot-local frame

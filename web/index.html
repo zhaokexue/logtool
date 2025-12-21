@@ -18,12 +18,22 @@
 
       <div class="toolbar-mid">
         <div class="field">
-          <div class="label">时间</div>
+          <div class="label">Time</div>
           <div class="value" id="txtTime">-</div>
         </div>
+        <!-- extra status text (optional) -->
         <div class="field">
-          <div class="label">状态</div>
+          <div class="label">Exception</div>
+          <div class="value" id="txtException">-</div>
+        </div>
+        <div class="field">
+          <div class="label">Clean state</div>
           <div class="value" id="txtState">-</div>
+        </div>
+
+        <div class="field">
+          <div class="label">Motion state</div>
+          <div class="value" id="txtMotionState">-</div>
         </div>
       </div>
 
@@ -42,7 +52,7 @@
     <div class="main">
       <div class="viewer">
         <canvas id="canvas" width="980" height="760"></canvas>
-        <div class="viewer-hint">拖拽平移 | 滚轮缩放 | 双击适配视图</div>
+        <div class="viewer-hint">拖拽平移 | 滚轮缩放 | Shift+左键旋转 | 双击适配视图</div>
 
         <!-- V3: overlay controls (content layers + view controls) -->
         <div class="viewer-overlay">
@@ -96,29 +106,24 @@
 
         <div class="info-body">
           <div class="info-sec">
-            <div class="sec-title">IMU</div>
+            <div class="sec-title">实时状态</div>
             <div class="kvgrid">
-              <div class="kv"><div class="k">pitch</div><div class="v mono" id="imu_pitch">-</div></div>
-              <div class="kv"><div class="k">roll</div><div class="v mono" id="imu_roll">-</div></div>
-              <div class="kv"><div class="k">yaw</div><div class="v mono" id="imu_yaw">-</div></div>
-            </div>
-          </div>
+              <!-- order & grouping per UI spec -->
+              <div class="kv span2"><div class="k">Ctrl_vel</div><div class="v mono" id="ctrl_vel">-</div></div>
 
-          <div class="info-sec">
-            <div class="sec-title">运动</div>
-            <div class="kvgrid">
-              <div class="kv span2"><div class="k">odom</div><div class="v mono" id="odom_txt">-</div></div>
-              <div class="kv span2"><div class="k">slip</div><div class="v mono" id="slip_txt">-</div></div>
-              <div class="kv span2"><div class="k">pose</div><div class="v mono" id="pose_txt">-</div></div>
-            </div>
-          </div>
+              <div class="kv span2"><div class="k">Odo_pose</div><div class="v mono" id="odo_pose">-</div></div>
+              <div class="kv span2"><div class="k">Odo_imu_fuse_pose</div><div class="v mono" id="odo_fuse_pose">-</div></div>
+              <div class="kv span2"><div class="k">Robot_pose</div><div class="v mono" id="robot_pose">-</div></div>
 
-          <div class="info-sec">
-            <div class="sec-title">时间戳</div>
-            <div class="kvgrid">
-              <div class="kv"><div class="k">scan_ts</div><div class="v mono" id="scan_ts">-</div></div>
-              <div class="kv"><div class="k">pose_ts</div><div class="v mono" id="pose_ts">-</div></div>
-              <div class="kv"><div class="k">map_ts</div><div class="v mono" id="map_ts">-</div></div>
+              <div class="kv span2"><div class="k">Pitch/Roll/Yaw/Yaw_vel</div><div class="v mono" id="imu_pry_yawvel">-</div></div>
+              <div class="kv span2"><div class="k">Acc_x/Acc_y/Acc_z</div><div class="v mono" id="imu_acc">-</div></div>
+
+              <div class="kv span2"><div class="k">Bumper/Wheel_up</div><div class="v mono" id="bumper_wheel">-</div></div>
+              <div class="kv span2"><div class="k">Right_IR/Sonar</div><div class="v mono" id="ir_sonar">-</div></div>
+              <div class="kv span2"><div class="k">Cliff_IR(LR,LF,RF,RR)</div><div class="v mono" id="cliff_ir">-</div></div>
+              <div class="kv span2"><div class="k">Line_slip/Rotate_slip</div><div class="v mono" id="slip_merge">-</div></div>
+              <div class="kv span2"><div class="k">Dock_IR/Dock_clip_state</div><div class="v mono" id="dock_merge">-</div></div>
+              <div class="kv span2"><div class="k">Battery_voltage</div><div class="v mono" id="battery_voltage">-</div></div>
             </div>
           </div>
         </div>

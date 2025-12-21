@@ -121,6 +121,47 @@ inline void serialize(BufferWriter& w, const Slip& v) {
     w.writeBool(v.rotate_slip);
 }
 
+inline void serialize(BufferWriter& w, const RobotStatus& v) {
+    w.writeLE(v.exception);
+    w.writeLE(v.motion_state);
+
+    w.writeBool(v.left_bumper);
+    w.writeBool(v.right_bumper);
+    w.writeBool(v.left_wheel_up);
+    w.writeBool(v.right_wheel_up);
+
+    w.writeBool(v.right_ir);
+
+    w.writeLE(v.ctrl_v);
+    w.writeLE(v.ctrl_w);
+
+    w.writeBool(v.cliff_lr);
+    w.writeBool(v.cliff_lf);
+    w.writeBool(v.cliff_rf);
+    w.writeBool(v.cliff_rr);
+
+    w.writeBool(v.line_slip_fwd);
+    w.writeBool(v.line_slip_back);
+
+    w.writeLE(v.sonar);
+
+    w.writeBool(v.rotate_slip_cw);
+    w.writeBool(v.rotate_slip_ccw);
+
+    w.writeLE(v.imu_yaw_vel);
+    w.writeLE(v.imu_acc_x);
+    w.writeLE(v.imu_acc_y);
+    w.writeLE(v.imu_acc_z);
+
+    w.writeBool(v.dock_ir1);
+    w.writeBool(v.dock_ir2);
+    w.writeBool(v.dock_ir3);
+    w.writeBool(v.dock_ir4);
+    w.writeBool(v.dock_clip_state);
+
+    w.writeLE(v.battery_voltage);
+}
+
 inline void serialize(BufferWriter& w, RobotState v) {
     w.writeLE(static_cast<uint32_t>(v));
 }
@@ -149,6 +190,47 @@ inline void deserialize(BufferReader& r, GridMap& v) {
 inline void deserialize(BufferReader& r, Slip& v) {
     v.line_slip = r.readBool();
     v.rotate_slip = r.readBool();
+}
+
+inline void deserialize(BufferReader& r, RobotStatus& v) {
+    v.exception = r.readLE<uint32_t>();
+    v.motion_state = r.readLE<uint32_t>();
+
+    v.left_bumper = r.readBool();
+    v.right_bumper = r.readBool();
+    v.left_wheel_up = r.readBool();
+    v.right_wheel_up = r.readBool();
+
+    v.right_ir = r.readBool();
+
+    v.ctrl_v = r.readLE<float>();
+    v.ctrl_w = r.readLE<float>();
+
+    v.cliff_lr = r.readBool();
+    v.cliff_lf = r.readBool();
+    v.cliff_rf = r.readBool();
+    v.cliff_rr = r.readBool();
+
+    v.line_slip_fwd = r.readBool();
+    v.line_slip_back = r.readBool();
+
+    v.sonar = r.readLE<float>();
+
+    v.rotate_slip_cw = r.readBool();
+    v.rotate_slip_ccw = r.readBool();
+
+    v.imu_yaw_vel = r.readLE<float>();
+    v.imu_acc_x = r.readLE<float>();
+    v.imu_acc_y = r.readLE<float>();
+    v.imu_acc_z = r.readLE<float>();
+
+    v.dock_ir1 = r.readBool();
+    v.dock_ir2 = r.readBool();
+    v.dock_ir3 = r.readBool();
+    v.dock_ir4 = r.readBool();
+    v.dock_clip_state = r.readBool();
+
+    v.battery_voltage = r.readLE<float>();
 }
 
 inline void deserialize(BufferReader& r, RobotState& v) {

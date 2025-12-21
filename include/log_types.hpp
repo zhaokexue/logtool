@@ -20,6 +20,59 @@ struct GridMap {
     std::vector<int8_t> data;
 };
 
+// Rich realtime status snapshot (aligned to pose timeline in viewer)
+// NOTE: This is an additive type (TYPE_STATUS). It does NOT replace TYPE_STATE/IMU/ODOM/SLIP.
+struct RobotStatus {
+    // top bar
+    uint32_t exception{0};
+    uint32_t motion_state{0};
+
+    // bumper / wheel-up
+    bool left_bumper{false};
+    bool right_bumper{false};
+    bool left_wheel_up{false};
+    bool right_wheel_up{false};
+
+    // wall follow IR (right)
+    bool right_ir{false};
+
+    // commanded velocity
+    float ctrl_v{0.0f};      // m/s
+    float ctrl_w{0.0f};      // rad/s
+
+    // cliff IR (LR, LF, RF, RR)
+    bool cliff_lr{false};
+    bool cliff_lf{false};
+    bool cliff_rf{false};
+    bool cliff_rr{false};
+
+    // line slip (forward/back)
+    bool line_slip_fwd{false};
+    bool line_slip_back{false};
+
+    // sonar distance (m)
+    float sonar{0.0f};
+
+    // rotate slip (cw/ccw)
+    bool rotate_slip_cw{false};
+    bool rotate_slip_ccw{false};
+
+    // imu derived
+    float imu_yaw_vel{0.0f}; // rad/s
+    float imu_acc_x{0.0f};
+    float imu_acc_y{0.0f};
+    float imu_acc_z{0.0f};
+
+    // docking
+    bool dock_ir1{false};
+    bool dock_ir2{false};
+    bool dock_ir3{false};
+    bool dock_ir4{false};
+    bool dock_clip_state{false};
+
+    float battery_voltage{0.0f};
+};
+
 enum class RobotState : uint32_t {
     selfcheck = 0, checkdock, findwall, followwall, coverage, gohome, end
 };
@@ -41,4 +94,5 @@ constexpr uint32_t TYPE_ODOM  = 103;
 constexpr uint32_t TYPE_SLIP  = 104;
 constexpr uint32_t TYPE_MAP   = 105;
 constexpr uint32_t TYPE_SCAN  = 106;
+constexpr uint32_t TYPE_STATUS= 107;
 

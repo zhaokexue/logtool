@@ -77,6 +77,15 @@ static void printParsedSummary(const Record& r) {
         } else if (r.type == TYPE_STATE) {
             auto v = parseRecordPayload<RobotState>(r);
             std::cout << "  state: " << static_cast<uint32_t>(v) << "\n";
+        } else if (r.type == TYPE_STATUS) {
+            auto s = parseRecordPayload<RobotStatus>(r);
+            std::cout << "  status: exception=" << s.exception
+                      << " motion_state=" << s.motion_state
+                      << " bumper(L,R)=" << (s.left_bumper?1:0) << "," << (s.right_bumper?1:0)
+                      << " wheel_up(L,R)=" << (s.left_wheel_up?1:0) << "," << (s.right_wheel_up?1:0)
+                      << " ctrl(v,w)=" << s.ctrl_v << "," << s.ctrl_w
+                      << " battery_v=" << s.battery_voltage
+                      << "\n";
         } else {
             std::cout << "  (no parser for type=" << r.type << ")\n";
         }
