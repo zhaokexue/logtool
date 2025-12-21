@@ -588,7 +588,10 @@ function drawTrajectory(){
   if (trajPts.length < 2) return;
   ctx.save();
   ctx.strokeStyle = '#000000';
-  ctx.lineWidth = 2;
+
+  // 轨迹线稍微细一点，避免和点大小产生明显差异
+  ctx.lineWidth = 1.5;
+
   ctx.beginPath();
   const p0 = worldToScreen(trajPts[0].x, trajPts[0].y);
   ctx.moveTo(p0.x, p0.y);
@@ -597,12 +600,16 @@ function drawTrajectory(){
     ctx.lineTo(p.x, p.y);
   }
   ctx.stroke();
-  // red points
-  ctx.fillStyle = '#000000';
-  for (let i=0;i<trajPts.length;i+=Math.max(1, Math.floor(trajPts.length/300))){
+
+  // pose 点：从半径 3 缩小到 2
+  ctx.fillStyle = '#007aff';
+  const step = Math.max(1, Math.floor(trajPts.length/300));
+  const r = 2; 
+
+  for (let i=0;i<trajPts.length;i+=step){
     ctx.beginPath();
     const p = worldToScreen(trajPts[i].x, trajPts[i].y);
-    ctx.arc(p.x, p.y, 3, 0, Math.PI*2);
+    ctx.arc(p.x, p.y, r, 0, Math.PI*2);
     ctx.fill();
   }
   ctx.restore();
