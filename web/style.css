@@ -401,3 +401,19 @@ body{
   .value{ max-width: 100%; }
   .viewer-overlay{ position: static; margin: 10px 0 0 0; }
 }
+
+/* Put mouse world coord at the right side of viewer-hint line */
+.viewer-hint{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.viewer-hint-right{
+  white-space: nowrap;
+}
+
+.viewer-hint .mono{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}

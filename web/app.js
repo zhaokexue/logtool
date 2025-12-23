@@ -54,6 +54,9 @@ const btnFitMap = el('btnFitMap');
 const btnFitTraj = el('btnFitTraj');
 const btnResetView = el('btnResetView');
 
+// Mouse world coordinate (debug)
+const mouseWorldEl = el('mouseWorld');
+
 // ---------------------- Measure UI (insert after ResetTraj, no HTML change) ----------------------
 const btnMeasure = (function(){
   let b = el('btnMeasure');
@@ -473,6 +476,14 @@ function canvasClientToCanvasPx(e){
   const sx = (e.clientX - rect.left) * (canvas.width / rect.width);
   const sy = (e.clientY - rect.top) * (canvas.height / rect.height);
   return {sx, sy};
+}
+
+// Update mouse position (world coordinates) under cursor, for debugging.
+function updateMouseWorld(e){
+  if (!mouseWorldEl) return;
+  const {sx, sy} = canvasClientToCanvasPx(e);
+  const w = screenToWorld(sx, sy);
+  mouseWorldEl.textContent = `(${w.x.toFixed(3)}, ${w.y.toFixed(3)})`;
 }
 
 // Helper: keep a world point fixed under a screen pixel (used by zoom + rotate-around-cursor)
@@ -1145,6 +1156,7 @@ canvas.addEventListener('pointerdown', (e)=>{
 });
 
 canvas.addEventListener('pointermove', (e)=>{
+  updateMouseWorld(e);
   if (!panState.active) return;
 
   const dx = e.clientX - panState.startX;
@@ -1247,6 +1259,11 @@ window.addEventListener('keydown', (e)=>{
     clearMeasure(false);
     if (lastFrame) render(lastFrame);
   }
+});
+
+// Clear mouse world coordinate when cursor leaves canvas.
+canvas.addEventListener('mouseleave', ()=>{
+  if (mouseWorldEl) mouseWorldEl.textContent = '(- , -)';
 });
 
 // Overlay controls: re-render immediately

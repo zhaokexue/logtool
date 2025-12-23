@@ -52,7 +52,12 @@
     <div class="main">
       <div class="viewer">
         <canvas id="canvas" width="980" height="760"></canvas>
-        <div class="viewer-hint">拖拽平移 | 滚轮缩放 | Shift+左键旋转 | 双击适配视图</div>
+
+        <!-- viewer hint (mouse world coord at right) -->
+        <div class="viewer-hint">
+          <span>拖拽平移 | 滚轮缩放 | Shift+左键旋转 | 双击适配视图</span>
+          <span class="viewer-hint-right"> 坐标: <span id="mouseWorld" class="mono">-</span></span>
+        </div>
 
         <!-- V3: overlay controls (content layers + view controls) -->
         <div class="viewer-overlay">
