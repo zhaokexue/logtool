@@ -545,13 +545,21 @@ function drawRvizGrid(){
   const startYMinor = Math.floor(miny / minorMeters) * minorMeters;
 
   ctx.save();
-  ctx.lineWidth = 1;
+
+  // ---------------- RViz-like gray theme ----------------
+  // Assumed canvas bg is light gray (e.g. #e6e6e6 in CSS).
+  // Minor grid: very light gray (still distinguishable from bg)
+  // Major grid: slightly darker gray
+  const minorStroke = 'rgba(255,255,255,0.12)';  // was 0.08 (too faint on gray bg)
+  const majorStroke = 'rgba(255,255,255,0.18)';  // was 0.18
+  const labelFill   = 'rgba(255,255,255,0.55)';  // softer than before (0.55)
 
   // minor
   // NOTE: after adding rotation, grid lines must be drawn by endpoints in world,
   // not by assuming screen-aligned X/Y.
   if (showMinor){
-    ctx.strokeStyle = 'rgba(0,0,0,0.08)';
+    ctx.strokeStyle = minorStroke;
+    ctx.lineWidth = 1;
     for (let x = startXMinor; x <= maxx; x += minorMeters){
       const A = worldToScreen(x, miny);
       const B = worldToScreen(x, maxy);
@@ -567,7 +575,8 @@ function drawRvizGrid(){
   // major
   const startXMajor = Math.floor(minx / majorMeters) * majorMeters;
   const startYMajor = Math.floor(miny / majorMeters) * majorMeters;
-  ctx.strokeStyle = 'rgba(0,0,0,0.18)';
+  ctx.strokeStyle = majorStroke;
+  ctx.lineWidth = 1.5;
   for (let x = startXMajor; x <= maxx; x += majorMeters){
     const A = worldToScreen(x, miny);
     const B = worldToScreen(x, maxy);
@@ -581,7 +590,7 @@ function drawRvizGrid(){
 
   // coordinate labels on major grid (lightweight, edges only)
   // NOTE: under rotation, "edges only" is not as meaningful; keep it lightweight and correct numerically.
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillStyle = labelFill;
   ctx.font = '12px system-ui, sans-serif';
   ctx.textBaseline = 'top';
   for (let x = startXMajor; x <= maxx; x += majorMeters){
@@ -642,14 +651,14 @@ function drawScaleBar(){
   const y = h - margin;
 
   ctx.save();
-  ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
   ctx.lineWidth = 3;
   ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
   ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(x0, y-8); ctx.lineTo(x0, y+8); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(x1, y-8); ctx.lineTo(x1, y+8); ctx.stroke();
 
-  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
   ctx.font = '12px system-ui, sans-serif';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'bottom';
