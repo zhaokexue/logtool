@@ -53,6 +53,9 @@ const btnFit = el('btnFit');
 const btnFitMap = el('btnFitMap');
 const btnFitTraj = el('btnFitTraj');
 const btnResetView = el('btnResetView');
+const ckGlobalPath = el('ckGlobalPath');
+const ckLocalPath  = el('ckLocalPath');
+const ckDebugPoints = el('ckDebugPoints');
 
 // Mouse world coordinate (debug)
 const mouseWorldEl = el('mouseWorld');
@@ -135,6 +138,10 @@ let panState = {
 let lastFrame = null;
 let trajPts = []; // appended while playing
 let currentTsNs = 0n;
+// extra drawable data (can come from frame or external JS APIs)
+let extraGlobalPath = null;  // [{x,y}, ...]
+let extraLocalPath  = null;  // [{x,y}, ...]
+let extraPointSets  = {};    // key -> {color, radius, points:[{x,y}, ...]}
 
 // ---------------------- Measure tool state ----------------------
 const measure = {
@@ -806,6 +813,77 @@ function drawTrajectory(){
   ctx.restore();
 }
 
+function drawPath(points, color, width){
+  if (!points || points.length < 2) return;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.beginPath();
+  let p = worldToScreen(points[0].x, points[0].y);
+  ctx.moveTo(p.x, p.y);
+  for (let i=1; i<points.length; ++i){
+    p = worldToScreen(points[i].x, points[i].y);
+    ctx.lineTo(p.x, p.y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawGlobalPath(frame){
+  if (!ckGlobalPath || !ckGlobalPath.checked) return;
+  const pts = (frame && frame.global_path) || extraGlobalPath;
+  // 采用青色，区分轨迹/局部路径
+  drawPath(pts, '#00ffff', 2.5);
+}
+
+function drawLocalPath(frame){
+  if (!ckLocalPath || !ckLocalPath.checked) return;
+  const pts = (frame && frame.local_path) || extraLocalPath;
+  // 采用黄色，局部路径更醒目
+  drawPath(pts, '#ffd54f', 2.5);
+}
+
+function drawDebugPoints(frame){
+  if (!ckDebugPoints || !ckDebugPoints.checked) return;
+
+  // 1) frame 自带 point_sets（可选）
+  if (frame && Array.isArray(frame.point_sets)){
+    for (const s of frame.point_sets){
+      if (!s || !Array.isArray(s.points)) continue;
+      const color  = s.color || '#ff0000';
+      const radius = s.radius_px || 2.0;
+      ctx.save();
+      ctx.fillStyle = color;
+      for (const p of s.points){
+        const wx = p.x ?? p[0];
+        const wy = p.y ?? p[1];
+        const sp = worldToScreen(wx, wy);
+        ctx.beginPath();
+        ctx.arc(sp.x, sp.y, radius, 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
+  // 2) 额外通过 JS 接口注入的 point sets
+  for (const key in extraPointSets){
+    const layer = extraPointSets[key];
+    if (!layer || !Array.isArray(layer.points)) continue;
+    const color  = layer.color  || '#ff0000';
+    const radius = layer.radius || 2.0;
+    ctx.save();
+    ctx.fillStyle = color;
+    for (const p of layer.points){
+      const sp = worldToScreen(p.x, p.y);
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, radius, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
 function drawScan(frame){
   if (!ckCloud || !ckCloud.checked) return;
   if (!frame.points || !frame.pose) return;
@@ -924,10 +1002,12 @@ function render(frame){
   drawScaleBar();
 
   drawMap();
+  drawGlobalPath(frame);
+  drawLocalPath(frame);
   drawTrajectory();
   drawScan(frame);
   drawRobot(frame);
-
+  drawDebugPoints(frame);
   // measure overlay on top
   drawMeasureOverlay();
 }
@@ -1372,3 +1452,40 @@ function loop(){
 
   requestAnimationFrame(loop);
 })();
+
+// -------- public helper APIs for debug / external scripts --------
+window.viewerSetGlobalPath = function(points){
+  // points: [{x,y}, ...]
+  extraGlobalPath = Array.isArray(points) ? points : null;
+  if (lastFrame) render(lastFrame);
+};
+
+window.viewerSetLocalPath = function(points){
+  extraLocalPath = Array.isArray(points) ? points : null;
+  if (lastFrame) render(lastFrame);
+};
+
+window.viewerClearPaths = function(){
+  extraGlobalPath = null;
+  extraLocalPath  = null;
+  if (lastFrame) render(lastFrame);
+};
+
+window.viewerSetPointSet = function(key, color, radiusPx, points){
+  if (!key) key = 'default';
+  extraPointSets[key] = {
+    color:  color  || '#ff0000',
+    radius: radiusPx || 2.0,
+    points: (Array.isArray(points) ? points.map(p => ({x:p.x ?? p[0], y:p.y ?? p[1]})) : [])
+  };
+  if (lastFrame) render(lastFrame);
+};
+
+window.viewerClearPointSet = function(key){
+  if (key){
+    delete extraPointSets[key];
+  }else{
+    extraPointSets = {};
+  }
+  if (lastFrame) render(lastFrame);
+};
