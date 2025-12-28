@@ -9,6 +9,7 @@
 #include <limits>
 #include <stdexcept>
 #include <sstream>
+#include <cerrno>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -67,7 +68,7 @@ static std::vector<float> buildTrajPrefixXY(const std::vector<PoseRec>& poses,
     if (step_ms == 0) step_ms = 50;
     if (max_points == 0) max_points = 8000;
 
-    size_t end_idx = lastIndexLE(poses, target_ts);
+    const size_t end_idx = lastIndexLE(poses, target_ts);
     const uint64_t step_ns = step_ms * 1000000ULL;
     const uint64_t t0 = poses.front().ts_ns;
     const uint64_t t_end = poses[end_idx].ts_ns;
@@ -114,11 +115,11 @@ static bool ends_with(const std::string& s, const std::string& suffix) {
     return std::equal(suffix.rbegin(), suffix.rend(), s.rbegin());
 }
 
-static std::string readFileBinary(const std::string& path) {
+static bool readFileBinary2(const std::string& path, std::string& out) {
     std::ifstream ifs(path, std::ios::binary);
-    if (!ifs) return "";
-    return std::string((std::istreambuf_iterator<char>(ifs)),
-                       std::istreambuf_iterator<char>());
+    if (!ifs) return false;
+    out.assign((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    return true;
 }
 
 static std::string contentType(const std::string& path) {
@@ -201,26 +202,26 @@ static std::string makeMetaJson(const IndexDB& db) {
     uint64_t t1 = db.all.empty() ? 0 : db.all.back().timestamp_ns;
     double dur = (t1 > t0) ? double(t1 - t0) / 1e9 : 0.0;
 
-    const bool has_map  = db.by_type.count(TYPE_MAP)  && !db.by_type.at(TYPE_MAP).empty();
-    const bool has_imu  = db.by_type.count(TYPE_IMU)  && !db.by_type.at(TYPE_IMU).empty();
-    const bool has_odom = db.by_type.count(TYPE_ODOM) && !db.by_type.at(TYPE_ODOM).empty();
-    const bool has_slip = db.by_type.count(TYPE_SLIP) && !db.by_type.at(TYPE_SLIP).empty();
-    const bool has_state= db.by_type.count(TYPE_STATE)&& !db.by_type.at(TYPE_STATE).empty();
+    const bool has_map   = db.by_type.count(TYPE_MAP)   && !db.by_type.at(TYPE_MAP).empty();
+    const bool has_imu   = db.by_type.count(TYPE_IMU)   && !db.by_type.at(TYPE_IMU).empty();
+    const bool has_odom  = db.by_type.count(TYPE_ODOM)  && !db.by_type.at(TYPE_ODOM).empty();
+    const bool has_slip  = db.by_type.count(TYPE_SLIP)  && !db.by_type.at(TYPE_SLIP).empty();
+    const bool has_state = db.by_type.count(TYPE_STATE) && !db.by_type.at(TYPE_STATE).empty();
     const bool has_status= db.by_type.count(TYPE_STATUS)&& !db.by_type.at(TYPE_STATUS).empty();
 
     uint64_t map_latest_ts = 0;
     if (has_map) map_latest_ts = db.by_type.at(TYPE_MAP).back().timestamp_ns;
 
-    return "{" 
-        "\"t0_ns\":" + std::to_string(t0) + "," 
-        "\"t1_ns\":" + std::to_string(t1) + "," 
-        "\"duration_sec\":" + std::to_string(dur) + "," 
-        "\"has_map\":" + std::string(has_map ? "true" : "false") + "," 
-        "\"has_imu\":" + std::string(has_imu ? "true" : "false") + "," 
-        "\"has_odom\":" + std::string(has_odom ? "true" : "false") + "," 
-        "\"has_slip\":" + std::string(has_slip ? "true" : "false") + "," 
-        "\"has_state\":" + std::string(has_state ? "true" : "false") + "," 
-        "\"has_status\":" + std::string(has_status ? "true" : "false") + "," 
+    return "{"
+        "\"t0_ns\":" + std::to_string(t0) + ","
+        "\"t1_ns\":" + std::to_string(t1) + ","
+        "\"duration_sec\":" + std::to_string(dur) + ","
+        "\"has_map\":" + std::string(has_map ? "true" : "false") + ","
+        "\"has_imu\":" + std::string(has_imu ? "true" : "false") + ","
+        "\"has_odom\":" + std::string(has_odom ? "true" : "false") + ","
+        "\"has_slip\":" + std::string(has_slip ? "true" : "false") + ","
+        "\"has_state\":" + std::string(has_state ? "true" : "false") + ","
+        "\"has_status\":" + std::string(has_status ? "true" : "false") + ","
         "\"map_latest_ts\":" + std::to_string(map_latest_ts) +
     "}";
 }
@@ -258,6 +259,10 @@ static std::string stateToText(uint32_t s) {
 
 // Build /api/frame response compatible with existing web/app.js
 static std::string makeFrameJson(uint64_t target_ts, const IndexDB& db, LogReader& reader) {
+    if (db.all.empty()) return "{\"error\":\"empty log\"}";
+    const uint64_t t0 = db.all.front().timestamp_ns;
+    if (target_ts == 0) target_ts = t0;
+
     // Pose is the primary timeline for UI. If missing, fallback to scan.
     const IndexItem* ip = db.nearest(TYPE_POSE, target_ts);
     if (!ip) return "{\"error\":\"no pose\"}";
@@ -316,7 +321,6 @@ static std::string makeFrameJson(uint64_t target_ts, const IndexDB& db, LogReade
         map_ts = im->timestamp_ns;
     }
 
-    const uint64_t t0 = db.all.empty() ? 0 : db.all.front().timestamp_ns;
     const double rel_sec = (pose_ts > t0) ? double(pose_ts - t0) / 1e9 : 0.0;
 
     std::string j;
@@ -432,6 +436,10 @@ static std::string makeFrameJson(uint64_t target_ts, const IndexDB& db, LogReade
 }
 
 static std::string makeMapJson(uint64_t target_ts, const IndexDB& db, LogReader& reader) {
+    if (db.all.empty()) return "{\"error\":\"empty log\"}";
+    const uint64_t t0 = db.all.front().timestamp_ns;
+    if (target_ts == 0) target_ts = t0;
+
     const IndexItem* im = db.nearest(TYPE_MAP, target_ts);
     if (!im) return "{\"error\":\"no map\"}";
     Record rm = reader.readAt(im->offset);
@@ -458,12 +466,23 @@ static std::string makeMapJson(uint64_t target_ts, const IndexDB& db, LogReader&
 static std::string makeTrajJson(uint64_t target_ts,
                                 uint64_t step_ms,
                                 size_t max_points,
+                                const IndexDB& db,
                                 const std::vector<PoseRec>& poses) {
     if (poses.empty()) return "{\"error\":\"no pose\"}";
+    if (db.all.empty()) return "{\"error\":\"empty log\"}";
+
+    const uint64_t t0 = db.all.front().timestamp_ns;
+    if (target_ts == 0) target_ts = t0;
+
     if (step_ms == 0) step_ms = 50;
     if (max_points == 0) max_points = 8000;
 
-    std::vector<float> xy = buildTrajPrefixXY(poses, target_ts, step_ms, max_points);
+    // Clamp target_ts into pose timeline range for stability.
+    uint64_t ts_clamped = target_ts;
+    if (ts_clamped < poses.front().ts_ns) ts_clamped = poses.front().ts_ns;
+    if (ts_clamped > poses.back().ts_ns)  ts_clamped = poses.back().ts_ns;
+
+    std::vector<float> xy = buildTrajPrefixXY(poses, ts_clamped, step_ms, max_points);
     const uint8_t* raw = reinterpret_cast<const uint8_t*>(xy.data());
     const size_t raw_len = xy.size() * sizeof(float);
     std::string b64 = b64encode(raw, raw_len);
@@ -472,7 +491,7 @@ static std::string makeTrajJson(uint64_t target_ts,
     j.reserve(b64.size() + 256);
     j += "{";
     j += "\"t0_ns\":" + std::to_string(poses.front().ts_ns) + ",";
-    j += "\"t1_ns\":" + std::to_string(target_ts) + ",";
+    j += "\"t1_ns\":" + std::to_string(ts_clamped) + ",";
     j += "\"step_ms\":" + std::to_string(step_ms) + ",";
     j += "\"count\":" + std::to_string(xy.size() / 2) + ",";
     j += "\"xy_f32_b64\":\"" + b64 + "\"";
@@ -509,6 +528,20 @@ static bool readHttpRequest(int fd, HttpRequest& out) {
     return !out.method.empty() && !out.target.empty();
 }
 
+static bool sendAll(int fd, const char* data, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = ::send(fd, data + off, len - off, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) return false;
+        off += static_cast<size_t>(n);
+    }
+    return true;
+}
+
 static void sendHttpResponse(int fd, int status, const std::string& content_type, const std::string& body) {
     std::string status_text = "OK";
     if (status == 404) status_text = "Not Found";
@@ -521,26 +554,44 @@ static void sendHttpResponse(int fd, int status, const std::string& content_type
     oss << "Content-Length: " << body.size() << "\r\n";
     oss << "Connection: close\r\n";
     oss << "\r\n";
-    std::string header = oss.str();
 
-    ::send(fd, header.data(), header.size(), 0);
-    if (!body.empty()) ::send(fd, body.data(), body.size(), 0);
+    const std::string header = oss.str();
+    (void)sendAll(fd, header.data(), header.size());
+    if (!body.empty()) (void)sendAll(fd, body.data(), body.size());
 }
 
-static std::string getQueryParamU64(const std::string& target, const std::string& key, uint64_t def=0) {
-    auto qpos = target.find('?');
-    if (qpos == std::string::npos) return "";
-    std::string q = target.substr(qpos + 1);
-    auto kpos = q.find(key + "=");
-    if (kpos == std::string::npos) return "";
-    kpos += key.size() + 1;
-    auto end = q.find('&', kpos);
-    std::string val = (end == std::string::npos) ? q.substr(kpos) : q.substr(kpos, end - kpos);
-    return val;
+// strict query parsing: split by '&', key must match exactly
+static bool queryGet(const std::string& target, const std::string& key, std::string& val_out) {
+    const auto qpos = target.find('?');
+    if (qpos == std::string::npos) return false;
+    const std::string q = target.substr(qpos + 1);
+
+    size_t i = 0;
+    while (i < q.size()) {
+        size_t amp = q.find('&', i);
+        if (amp == std::string::npos) amp = q.size();
+        const std::string kv = q.substr(i, amp - i);
+        const size_t eq = kv.find('=');
+        if (eq != std::string::npos) {
+            const std::string k = kv.substr(0, eq);
+            if (k == key) {
+                val_out = kv.substr(eq + 1);
+                return true;
+            }
+        }
+        i = amp + 1;
+    }
+    return false;
+}
+
+static uint64_t queryGetU64(const std::string& target, const std::string& key, uint64_t def=0) {
+    std::string v;
+    if (!queryGet(target, key, v) || v.empty()) return def;
+    return static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
 }
 
 int main(int argc, char** argv) {
-    signal(SIGPIPE, SIG_IGN);   // 关键：避免 Broken pipe 直接杀进程
+    signal(SIGPIPE, SIG_IGN);   // avoid Broken pipe killing the process
     try {
         std::string log_path = "data/fake_cleaning.log";
         std::string web_root = "web";
@@ -599,7 +650,7 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            std::string target = req.target;
+            const std::string target = req.target;
 
             // API
             if (target == "/api/meta") {
@@ -609,9 +660,7 @@ int main(int argc, char** argv) {
             }
 
             if (target.rfind("/api/frame", 0) == 0) {
-                uint64_t ts = 0;
-                std::string v = getQueryParamU64(target, "ts_ns");
-                if (!v.empty()) ts = static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
+                const uint64_t ts = queryGetU64(target, "ts_ns", 0);
                 std::string body = makeFrameJson(ts, db, reader);
                 sendHttpResponse(client_fd, 200, "application/json; charset=utf-8", body);
                 ::close(client_fd);
@@ -619,9 +668,7 @@ int main(int argc, char** argv) {
             }
 
             if (target.rfind("/api/map", 0) == 0) {
-                uint64_t ts = 0;
-                std::string v = getQueryParamU64(target, "ts_ns");
-                if (!v.empty()) ts = static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
+                const uint64_t ts = queryGetU64(target, "ts_ns", 0);
                 std::string body = makeMapJson(ts, db, reader);
                 sendHttpResponse(client_fd, 200, "application/json; charset=utf-8", body);
                 ::close(client_fd);
@@ -629,18 +676,11 @@ int main(int argc, char** argv) {
             }
 
             if (target.rfind("/api/traj", 0) == 0) {
-                uint64_t ts = 0;
-                uint64_t step_ms = 50;
-                size_t max_points = 8000;
+                const uint64_t ts = queryGetU64(target, "ts_ns", 0);
+                const uint64_t step_ms = queryGetU64(target, "step_ms", 50);
+                const size_t max_points = static_cast<size_t>(queryGetU64(target, "max_points", 8000));
 
-                std::string v = getQueryParamU64(target, "ts_ns");
-                if (!v.empty()) ts = static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
-                v = getQueryParamU64(target, "step_ms");
-                if (!v.empty()) step_ms = static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
-                v = getQueryParamU64(target, "max_points");
-                if (!v.empty()) max_points = static_cast<size_t>(std::strtoull(v.c_str(), nullptr, 10));
-
-                std::string body = makeTrajJson(ts, step_ms, max_points, poses);
+                std::string body = makeTrajJson(ts, step_ms, max_points, db, poses);
                 sendHttpResponse(client_fd, 200, "application/json; charset=utf-8", body);
                 ::close(client_fd);
                 continue;
@@ -655,13 +695,15 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            std::string full = web_root + path;
-            std::string body = readFileBinary(full);
-            if (body.empty()) {
+            const std::string full = web_root + path;
+
+            std::string body;
+            if (!readFileBinary2(full, body)) {
                 sendHttpResponse(client_fd, 404, "text/plain; charset=utf-8", "404 Not Found");
                 ::close(client_fd);
                 continue;
             }
+
             sendHttpResponse(client_fd, 200, contentType(full), body);
             ::close(client_fd);
         }
