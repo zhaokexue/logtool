@@ -50,22 +50,31 @@ static void demoDragPreview(const std::string& log_path,
                   << " offset=" << it->offset
                   << " len=" << r.length << "\n";
 
-        if (type == TYPE_POSE) {
+        if (type == TYPE_ROBOT_REALTIME_POSE || type == TYPE_ROBOT_POSE) {
             auto p = parseRecordPayload<Pose2D>(r);
             std::cout << "  pose=(" << p.x << "," << p.y << ") a=" << p.angle << "\n";
-        } else if (type == TYPE_MAP) {
+        } else if (type == TYPE_GRID_MAP || type == TYPE_EXPROATION_GRID_MAP) {
             auto m = parseRecordPayload<GridMap>(r);
             std::cout << "  map=" << m.width << "x" << m.height << " res=" << m.resolution << "\n";
+        } else if (type == TYPE_ROBOT_LIDAR) {
+            auto s = parseRecordPayload<LaserScan>(r);
+            std::cout << "  scan beams=" << s.beams.size() << " a0=" << s.angle_min
+                      << " da=" << s.angle_increment << "\n";
+        } else if (type == TYPE_SENSOR_DATA) {
+            auto sd = parseRecordPayload<SensorData>(r);
+            std::cout << "  sensor ctrl_v=" << sd.ctrl_v << " ctrl_w=" << sd.ctrl_w
+                      << " batt=" << sd.battery_voltage << "\n";
         }
     };
 
-    pick(TYPE_STATE);
-    pick(TYPE_POSE);
-    pick(TYPE_IMU);
-    pick(TYPE_ODOM);
-    pick(TYPE_SLIP);
-    pick(TYPE_MAP);
-    pick(TYPE_SCAN);
+    pick(TYPE_CLEAN_STATE);
+    pick(TYPE_EXCEPTION_DATA);
+    pick(TYPE_MOTION_STATE);
+    pick(TYPE_SENSOR_DATA);
+    pick(TYPE_GRID_MAP);
+    pick(TYPE_ROBOT_REALTIME_POSE);
+    pick(TYPE_ROBOT_POSE);
+    pick(TYPE_ROBOT_LIDAR);
 }
 
 static std::string argValue(int argc, char** argv, const std::string& key, const std::string& def="") {
@@ -131,7 +140,7 @@ int main(int argc, char** argv) {
 
         IndexDB db = loadIndex(idx_path);
 
-        // Drag preview at mid time (use earliest index ts as t0)
+        // Drag preview at mid time
         uint64_t t0 = db.all.empty() ? 0 : db.all.front().timestamp_ns;
         uint64_t target_ts = t0 + static_cast<uint64_t>((duration_sec * 0.5) * 1e9);
 
@@ -145,5 +154,3 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
-
-

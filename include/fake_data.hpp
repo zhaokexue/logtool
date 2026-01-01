@@ -16,10 +16,18 @@
 #include "log_io.hpp"
 #include "index.hpp"
 
-// =========================
+// =========================================
+// Floorplan-assets -> fake cleaning log generator (vNext protocol)
+// Inputs:
+//  - assets/grid_map.npy : int16 2D grid (-1 unknown, 0 free, 100 occupied)
+//  - assets/trajectory.csv : columns timestamp_ns,x_m,y_m,angle_rad
+// Output:
+//  - binary log + index
+// =========================================
+
+// -------------------------
 // CSV trajectory loader
-// Expected columns: timestamp_ns,x_m,y_m,angle_rad
-// =========================
+// -------------------------
 struct PoseSample {
     uint64_t ts{0};
     float x{0}, y{0}, a{0};
@@ -30,561 +38,561 @@ inline std::vector<PoseSample> loadTrajectoryCSV(const std::string& csv_path) {
     if (!ifs) throw std::runtime_error("loadTrajectoryCSV: cannot open " + csv_path);
 
     std::string line;
+    std::getline(ifs, line); // header
+
     std::vector<PoseSample> out;
-
-    // header
-    if (!std::getline(ifs, line)) throw std::runtime_error("loadTrajectoryCSV: empty file");
-
     while (std::getline(ifs, line)) {
         if (line.empty()) continue;
-
-        // split by comma
-        size_t p = 0;
-        auto nextTok = [&](size_t& pos) -> std::string {
-            size_t q = line.find(',', pos);
-            std::string tok = (q == std::string::npos) ? line.substr(pos) : line.substr(pos, q - pos);
-            pos = (q == std::string::npos) ? std::string::npos : q + 1;
-            return tok;
-        };
-
-        std::string s_ts = nextTok(p);
-        std::string s_x  = (p==std::string::npos) ? "" : nextTok(p);
-        std::string s_y  = (p==std::string::npos) ? "" : nextTok(p);
-        std::string s_a  = (p==std::string::npos) ? "" : nextTok(p);
-
-        if (s_ts.empty() || s_x.empty() || s_y.empty() || s_a.empty()) continue;
-
-        PoseSample ps;
-        ps.ts = static_cast<uint64_t>(std::stoull(s_ts));
-        ps.x  = std::stof(s_x);
-        ps.y  = std::stof(s_y);
-        ps.a  = std::stof(s_a);
-        out.push_back(ps);
+        std::stringstream ss(line);
+        std::string tok;
+        PoseSample p;
+        std::getline(ss, tok, ','); p.ts = static_cast<uint64_t>(std::stoull(tok));
+        std::getline(ss, tok, ','); p.x  = static_cast<float>(std::stof(tok));
+        std::getline(ss, tok, ','); p.y  = static_cast<float>(std::stof(tok));
+        std::getline(ss, tok, ','); p.a  = static_cast<float>(std::stof(tok));
+        out.push_back(p);
     }
-
-    if (out.size() < 2) throw std::runtime_error("loadTrajectoryCSV: too few samples");
+    if (out.size() < 2) throw std::runtime_error("loadTrajectoryCSV: trajectory too short");
     std::sort(out.begin(), out.end(), [](const PoseSample& a, const PoseSample& b){ return a.ts < b.ts; });
     return out;
 }
 
-inline PoseSample samplePoseNearest(const std::vector<PoseSample>& traj, uint64_t target_ts) {
-    auto it = std::lower_bound(traj.begin(), traj.end(), target_ts,
-                               [](const PoseSample& a, uint64_t ts){ return a.ts < ts; });
-    if (it == traj.begin()) return *it;
-    if (it == traj.end()) return traj.back();
-    const auto& r = *it;
-    const auto& l = *(it - 1);
-    return (target_ts - l.ts <= r.ts - target_ts) ? l : r;
-}
-
-// =========================
-// Minimal NPY loader: int16, 2D, C-order
-// Supports numpy np.save(int16[H,W]) output from our script.
-// =========================
+// -------------------------
+// Minimal .npy (v1.0) loader for int16 2D
+// -------------------------
 struct NpyArrayI16 {
-    int32_t H{0}, W{0};
-    std::vector<int16_t> data;
+    int rows{0};
+    int cols{0};
+    std::vector<int16_t> data; // row-major
 };
-
-inline std::string readExact(std::ifstream& ifs, size_t n) {
-    std::string s(n, '\0');
-    ifs.read(&s[0], static_cast<std::streamsize>(n));
-    if (!ifs) throw std::runtime_error("NPY: read failed");
-    return s;
-}
 
 inline NpyArrayI16 loadNpyInt16_2D(const std::string& npy_path) {
     std::ifstream ifs(npy_path, std::ios::binary);
     if (!ifs) throw std::runtime_error("loadNpyInt16_2D: cannot open " + npy_path);
 
     // magic
-    auto magic = readExact(ifs, 6);
-    if (magic != "\x93NUMPY") throw std::runtime_error("NPY: bad magic");
+    char magic[6] = {0};
+    ifs.read(magic, 6);
+    if (std::strncmp(magic, "\x93NUMPY", 6) != 0) throw std::runtime_error("bad npy magic");
 
-    uint8_t ver_major = 0, ver_minor = 0;
-    ifs.read(reinterpret_cast<char*>(&ver_major), 1);
-    ifs.read(reinterpret_cast<char*>(&ver_minor), 1);
-    if (!ifs) throw std::runtime_error("NPY: read version failed");
+    uint8_t vmaj=0, vmin=0;
+    ifs.read(reinterpret_cast<char*>(&vmaj), 1);
+    ifs.read(reinterpret_cast<char*>(&vmin), 1);
 
-    uint32_t header_len = 0;
-    if (ver_major == 1) {
-        uint16_t hl16 = 0;
-        ifs.read(reinterpret_cast<char*>(&hl16), 2);
-        header_len = hl16;
-    } else if (ver_major == 2) {
-        uint32_t hl32 = 0;
-        ifs.read(reinterpret_cast<char*>(&hl32), 4);
-        header_len = hl32;
-    } else {
-        throw std::runtime_error("NPY: unsupported version");
+    uint16_t header_len = 0;
+    ifs.read(reinterpret_cast<char*>(&header_len), 2);
+
+    std::string header(header_len, '\0');
+    ifs.read(header.data(), header_len);
+
+    // very small header parser (assumes little-endian, C-order)
+    // Expect: {'descr': '<i2', 'fortran_order': False, 'shape': (H, W), }
+    if (header.find("'<i2'") == std::string::npos && header.find("\"<i2\"") == std::string::npos) {
+        throw std::runtime_error("npy dtype is not <i2");
     }
-    if (!ifs) throw std::runtime_error("NPY: read header length failed");
-
-    std::string header = readExact(ifs, header_len);
-
-    if (header.find("<i2") == std::string::npos)
-        throw std::runtime_error("NPY: only supports little-endian int16 (<i2)");
-    if (header.find("fortran_order") == std::string::npos)
-        throw std::runtime_error("NPY: missing fortran_order");
-    if (header.find("fortran_order") != std::string::npos && header.find("True") != std::string::npos)
-        throw std::runtime_error("NPY: fortran_order=True not supported");
-
-    auto pshape = header.find("shape");
-    if (pshape == std::string::npos) throw std::runtime_error("NPY: missing shape");
-    auto lp = header.find('(', pshape);
-    auto rp = header.find(')', pshape);
-    if (lp == std::string::npos || rp == std::string::npos || rp <= lp)
-        throw std::runtime_error("NPY: bad shape");
-
+    if (header.find("fortran_order") != std::string::npos && header.find("True") != std::string::npos) {
+        throw std::runtime_error("npy fortran_order not supported");
+    }
+    auto shp = header.find("shape");
+    if (shp == std::string::npos) throw std::runtime_error("npy header missing shape");
+    auto lp = header.find('(', shp);
+    auto rp = header.find(')', shp);
+    if (lp == std::string::npos || rp == std::string::npos || rp <= lp) throw std::runtime_error("bad shape");
     std::string inside = header.substr(lp + 1, rp - lp - 1);
+    inside.erase(std::remove_if(inside.begin(), inside.end(), [](char c){ return c==' ' || c=='\n' || c=='\t'; }), inside.end());
 
-    int H = 0, W = 0;
+    int H=0, W=0;
     {
-        std::stringstream ss(inside);
-        char comma = 0;
-        ss >> H;
-        ss >> comma;
-        ss >> W;
-        if (H <= 0 || W <= 0) throw std::runtime_error("NPY: invalid shape values");
+        auto comma = inside.find(',');
+        if (comma == std::string::npos) throw std::runtime_error("bad shape tuple");
+        H = std::stoi(inside.substr(0, comma));
+        W = std::stoi(inside.substr(comma + 1));
     }
+    if (H <= 0 || W <= 0) throw std::runtime_error("bad npy shape");
 
-    NpyArrayI16 arr;
-    arr.H = H;
-    arr.W = W;
-    arr.data.resize(static_cast<size_t>(H) * static_cast<size_t>(W));
+    NpyArrayI16 a;
+    a.rows = H;
+    a.cols = W;
+    a.data.resize(static_cast<size_t>(H) * static_cast<size_t>(W));
 
-    ifs.read(reinterpret_cast<char*>(arr.data.data()),
-             static_cast<std::streamsize>(arr.data.size() * sizeof(int16_t)));
-    if (!ifs) throw std::runtime_error("NPY: read array data failed");
-
-    return arr;
+    ifs.read(reinterpret_cast<char*>(a.data.data()), static_cast<std::streamsize>(a.data.size() * sizeof(int16_t)));
+    if (!ifs) throw std::runtime_error("npy data read failed");
+    return a;
 }
 
-inline GridMap gridMapFromOcc(const NpyArrayI16& occ, float resolution) {
-    GridMap m;
-    m.width = occ.W;
-    m.height = occ.H;
-    m.resolution = resolution;
-    // coordinate convention: bottom-left is (0,0)
-    m.origin_x = 0.0f;
-    m.origin_y = 0.0f;
+// -------------------------
+// Path set builders (global/local) from reference trajectory
+// -------------------------
+// We emit Pose2DSet records for global/local paths at low frequency.
+// The UI only needs x/y; angle is kept for completeness.
+inline Pose2DSet buildGlobalPathFromTraj(const std::vector<PoseSample>& traj,
+                                        size_t start_idx,
+                                        float min_step_m = 0.20f,
+                                        size_t max_points = 600) {
+    Pose2DSet out;
+    if (traj.empty()) return out;
+    start_idx = std::min(start_idx, traj.size() - 1);
 
-    m.data.resize(static_cast<size_t>(m.width) * static_cast<size_t>(m.height));
-    for (int y = 0; y < m.height; ++y) {
-        for (int x = 0; x < m.width; ++x) {
-            int16_t v = occ.data[static_cast<size_t>(y) * m.width + x];
-            int8_t out = -1;
-            if (v <= -1) out = -1;
-            else if (v >= 100) out = 100;
-            else out = 0;
-            m.data[static_cast<size_t>(y) * m.width + x] = out;
+    float lastx = traj[start_idx].x;
+    float lasty = traj[start_idx].y;
+    out.pose_set.push_back(Pose2D{lastx, lasty, traj[start_idx].a});
+
+    const float min_step2 = min_step_m * min_step_m;
+    for (size_t i = start_idx + 1; i < traj.size() && out.pose_set.size() < max_points; ++i) {
+        const float dx = traj[i].x - lastx;
+        const float dy = traj[i].y - lasty;
+        if ((dx * dx + dy * dy) < min_step2) continue;
+        out.pose_set.push_back(Pose2D{traj[i].x, traj[i].y, traj[i].a});
+        lastx = traj[i].x;
+        lasty = traj[i].y;
+    }
+    return out;
+}
+
+inline Pose2DSet buildLocalPathFromTraj(const std::vector<PoseSample>& traj,
+                                       size_t start_idx,
+                                       float horizon_m = 3.0f,
+                                       float min_step_m = 0.10f,
+                                       size_t max_points = 200) {
+    Pose2DSet out;
+    if (traj.empty()) return out;
+    start_idx = std::min(start_idx, traj.size() - 1);
+
+    float lastx = traj[start_idx].x;
+    float lasty = traj[start_idx].y;
+    out.pose_set.push_back(Pose2D{lastx, lasty, traj[start_idx].a});
+
+    const float horizon2 = horizon_m * horizon_m;
+    const float min_step2 = min_step_m * min_step_m;
+    for (size_t i = start_idx + 1; i < traj.size() && out.pose_set.size() < max_points; ++i) {
+        // stop if we reached horizon distance from the start point
+        const float dhx = traj[i].x - traj[start_idx].x;
+        const float dhy = traj[i].y - traj[start_idx].y;
+        if ((dhx * dhx + dhy * dhy) > horizon2) break;
+
+        const float dx = traj[i].x - lastx;
+        const float dy = traj[i].y - lasty;
+        if ((dx * dx + dy * dy) < min_step2) continue;
+        out.pose_set.push_back(Pose2D{traj[i].x, traj[i].y, traj[i].a});
+        lastx = traj[i].x;
+        lasty = traj[i].y;
+    }
+    return out;
+}
+
+// -------------------------
+// Geometry helpers
+// -------------------------
+inline void worldToCell(float wx, float wy, float origin_x, float origin_y, float res, int& cx, int& cy) {
+    cx = static_cast<int>(std::floor((wx - origin_x) / res));
+    cy = static_cast<int>(std::floor((wy - origin_y) / res));
+}
+
+inline void worldToLocal(float wx, float wy, float px, float py, float yaw, float& lx, float& ly) {
+    // local: x forward, y left
+    const float dx = wx - px;
+    const float dy = wy - py;
+    const float c = std::cos(yaw);
+    const float s = std::sin(yaw);
+    lx =  c * dx + s * dy;
+    ly = -s * dx + c * dy;
+}
+
+inline void localToWorld(float lx, float ly, float px, float py, float yaw, float& wx, float& wy) {
+    // local: x forward, y left
+    const float c = std::cos(yaw);
+    const float s = std::sin(yaw);
+    wx = px + lx * c - ly * s;
+    wy = py + lx * s + ly * c;
+}
+
+// DDA raycast on occupancy grid (occ: int16, -1 unknown, 0 free, 100 occupied)
+inline float raycastGridHit(const NpyArrayI16& occ,
+                            float px, float py, float ang_world,
+                            float origin_x, float origin_y, float res,
+                            float max_range_m,
+                            bool hit_unknown,
+                            float& hx, float& hy) {
+    const int H = occ.rows;
+    const int W = occ.cols;
+    const float dx = std::cos(ang_world);
+    const float dy = std::sin(ang_world);
+    const float eps = 1e-9f;
+
+    int cx=0, cy=0;
+    worldToCell(px, py, origin_x, origin_y, res, cx, cy);
+    if (cx < 0 || cx >= W || cy < 0 || cy >= H) {
+        hx = px + max_range_m * dx;
+        hy = py + max_range_m * dy;
+        return max_range_m;
+    }
+
+    auto at = [&](int x, int y)->int16_t { return occ.data[static_cast<size_t>(y) * static_cast<size_t>(W) + static_cast<size_t>(x)]; };
+
+    // check starting cell
+    {
+        const int16_t v0 = at(cx, cy);
+        if ((hit_unknown && v0 == -1) || (v0 >= 100)) {
+            hx = px; hy = py;
+            return 0.f;
         }
     }
-    return m;
-}
 
-// =========================
-// Old Simplified LaserScan (rect boundary) - kept as fallback/reference
-// =========================
-inline float rayToRectBoundary(float x, float y, float ang, float xmin, float xmax, float ymin, float ymax) {
-    float dx = std::cos(ang);
-    float dy = std::sin(ang);
-    const float eps = 1e-6f;
-    float tmin = 1e9f;
+    const int step_x = (dx > 0) ? 1 : -1;
+    const int step_y = (dy > 0) ? 1 : -1;
 
-    if (std::fabs(dx) > eps) {
-        float tx1 = (xmin - x) / dx;
-        float tx2 = (xmax - x) / dx;
-        if (tx1 > 0) tmin = std::min(tmin, tx1);
-        if (tx2 > 0) tmin = std::min(tmin, tx2);
+    float tMaxX = std::numeric_limits<float>::infinity();
+    float tMaxY = std::numeric_limits<float>::infinity();
+    float tDeltaX = std::numeric_limits<float>::infinity();
+    float tDeltaY = std::numeric_limits<float>::infinity();
+
+    if (std::abs(dx) >= eps) {
+        const float next_vert = origin_x + (cx + (dx > 0 ? 1 : 0)) * res;
+        tMaxX = (next_vert - px) / dx;
+        tDeltaX = res / std::abs(dx);
     }
-    if (std::fabs(dy) > eps) {
-        float ty1 = (ymin - y) / dy;
-        float ty2 = (ymax - y) / dy;
-        if (ty1 > 0) tmin = std::min(tmin, ty1);
-        if (ty2 > 0) tmin = std::min(tmin, ty2);
-    }
-    return std::clamp(tmin, 0.05f, 8.0f);
-}
-
-// =========================
-// Correct LaserScan: raycast against occupancy grid (DDA traversal)
-// =========================
-inline bool isOccupiedCell(const GridMap& grid, int cx, int cy, int8_t occ_thresh = 50) {
-    if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height) return false;
-    const int8_t v = grid.data[static_cast<size_t>(cy) * grid.width + cx];
-    return (v >= occ_thresh); // 100 or >=50 treated as obstacle
-}
-
-// Ray vs AABB intersection (2D). Returns true if intersects in forward direction.
-// Outputs entry distance t_enter (>=0) and exit distance t_exit.
-inline bool rayIntersectAABB2D(
-    float x0, float y0, float dx, float dy,
-    float xmin, float xmax, float ymin, float ymax,
-    float& t_enter, float& t_exit
-) {
-    const float inf = std::numeric_limits<float>::infinity();
-    float tx1 = -inf, tx2 = inf;
-    float ty1 = -inf, ty2 = inf;
-
-    if (std::fabs(dx) > 1e-8f) {
-        tx1 = (xmin - x0) / dx;
-        tx2 = (xmax - x0) / dx;
-        if (tx1 > tx2) std::swap(tx1, tx2);
-    } else {
-        // Parallel to Y axis: must be within slab
-        if (x0 < xmin || x0 > xmax) return false;
+    if (std::abs(dy) >= eps) {
+        const float next_horz = origin_y + (cy + (dy > 0 ? 1 : 0)) * res;
+        tMaxY = (next_horz - py) / dy;
+        tDeltaY = res / std::abs(dy);
     }
 
-    if (std::fabs(dy) > 1e-8f) {
-        ty1 = (ymin - y0) / dy;
-        ty2 = (ymax - y0) / dy;
-        if (ty1 > ty2) std::swap(ty1, ty2);
-    } else {
-        // Parallel to X axis: must be within slab
-        if (y0 < ymin || y0 > ymax) return false;
-    }
-
-    t_enter = std::max(tx1, ty1);
-    t_exit  = std::min(tx2, ty2);
-    if (t_exit < 0) return false;        // box is behind ray
-    if (t_enter > t_exit) return false;  // miss
-    if (t_enter < 0) t_enter = 0;        // start inside box
-    return true;
-}
-
-inline float raycastOccGridDDA(
-    const GridMap& grid,
-    float x0, float y0,
-    float ang,
-    float max_range = 8.0f,
-    int8_t occ_thresh = 50
-) {
-    const float dx = std::cos(ang);
-    const float dy = std::sin(ang);
-    const float eps = 1e-8f;
-
-    if (std::fabs(dx) < eps && std::fabs(dy) < eps) return max_range;
-
-    const float res = grid.resolution;
-    const float ox  = grid.origin_x;
-    const float oy  = grid.origin_y;
-
-    // Grid bbox in world coordinates (note: xmax/ymax are outer edge)
-    const float xmin = ox;
-    const float ymin = oy;
-    const float xmax = ox + grid.width  * res;
-    const float ymax = oy + grid.height * res;
-
-    // If start outside, compute entry point into bbox first
-    float t_enter = 0.0f, t_exit = 0.0f;
-    if (!rayIntersectAABB2D(x0, y0, dx, dy, xmin, xmax, ymin, ymax, t_enter, t_exit)) {
-        return max_range;
-    }
-
-    // Start point for traversal: just inside the box
-    float t0 = t_enter;
-    float sx = x0 + dx * t0;
-    float sy = y0 + dy * t0;
-
-    // Nudge forward a tiny bit to avoid landing exactly on boundary
-    sx += dx * 1e-4f;
-    sy += dy * 1e-4f;
-
-    // Convert start to cell
-    int cx = static_cast<int>(std::floor((sx - ox) / res));
-    int cy = static_cast<int>(std::floor((sy - oy) / res));
-
-    // Clamp to valid range (robustness)
-    cx = std::clamp(cx, 0, grid.width  - 1);
-    cy = std::clamp(cy, 0, grid.height - 1);
-
-    // Starting cell occupied => small range
-    if (isOccupiedCell(grid, cx, cy, occ_thresh)) {
-        return std::clamp(t0, 0.05f, max_range);
-    }
-
-    const int stepX = (dx > 0) ? 1 : -1;
-    const int stepY = (dy > 0) ? 1 : -1;
-
-    // Next boundary in world coordinates
-    const float nextBx = ox + ((dx > 0) ? (cx + 1) * res : cx * res);
-    const float nextBy = oy + ((dy > 0) ? (cy + 1) * res : cy * res);
-
-    float tMaxX = (std::fabs(dx) < eps) ? 1e30f : (nextBx - sx) / dx;
-    float tMaxY = (std::fabs(dy) < eps) ? 1e30f : (nextBy - sy) / dy;
-
-    const float tDeltaX = (std::fabs(dx) < eps) ? 1e30f : (res / std::fabs(dx));
-    const float tDeltaY = (std::fabs(dy) < eps) ? 1e30f : (res / std::fabs(dy));
-
-    // t is measured from (sx,sy). total distance from original is t0 + t.
-    float t = 0.0f;
-
-    while ((t0 + t) <= max_range) {
+    float t = 0.f;
+    while (t <= max_range_m) {
         if (tMaxX < tMaxY) {
-            cx += stepX;
-            t  = tMaxX;
+            cx += step_x;
+            t = tMaxX;
             tMaxX += tDeltaX;
         } else {
-            cy += stepY;
-            t  = tMaxY;
+            cy += step_y;
+            t = tMaxY;
             tMaxY += tDeltaY;
         }
 
-        // Out of map => return distance to boundary (still within ray)
-        if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height) {
-            return std::clamp(t0 + t, 0.05f, max_range);
+        if (t > max_range_m) break;
+
+        if (cx < 0 || cx >= W || cy < 0 || cy >= H) {
+            hx = px + t * dx;
+            hy = py + t * dy;
+            return t;
         }
 
-        // Hit occupied cell
-        if (isOccupiedCell(grid, cx, cy, occ_thresh)) {
-            return std::clamp(t0 + t, 0.05f, max_range);
+        const int16_t v = at(cx, cy);
+        if (hit_unknown && v == -1) {
+            hx = px + t * dx;
+            hy = py + t * dy;
+            return t;
+        }
+        if (v >= 100) {
+            hx = px + t * dx;
+            hy = py + t * dy;
+            return t;
         }
     }
 
-    return max_range;
+    hx = px + max_range_m * dx;
+    hy = py + max_range_m * dy;
+    return max_range_m;
 }
 
-// =========================
-// Scheduler
-// =========================
-struct StreamSched {
-    uint32_t type;
-    uint64_t period_ns;
-    uint64_t next_ts;
-};
-
-inline uint64_t periodNsFromHz(uint64_t hz) {
-    return static_cast<uint64_t>(1'000'000'000ull / hz);
+// -------------------------
+// Sampling helpers
+// -------------------------
+inline PoseSample samplePoseAt(const std::vector<PoseSample>& traj, uint64_t ts_ns) {
+    // hold-last (nearest <= ts)
+    auto it = std::upper_bound(traj.begin(), traj.end(), ts_ns,
+                               [](uint64_t t, const PoseSample& p){ return t < p.ts; });
+    if (it == traj.begin()) return traj.front();
+    return *(it - 1);
 }
 
-// =========================
-// Main API: generate log from floorplan assets
-// =========================
+inline CleanState cleanStateAt(double progress01) {
+    // progress partition similar to previous generator
+    if (progress01 < 0.05) return CleanState::selfcheck;
+    if (progress01 < 0.10) return CleanState::checkdock;
+    if (progress01 < 0.20) return CleanState::findwall;
+    if (progress01 < 0.35) return CleanState::followwall;
+    if (progress01 < 0.90) return CleanState::coverage;
+    if (progress01 < 0.98) return CleanState::gohome;
+    return CleanState::end;
+}
+
+// -------------------------
+// Main generator
+// -------------------------
 inline void generateFakeCleaningLogFromFloorplanAssets(
-    const std::string& log_path,
-    const std::string& idx_path,
+    const std::string& out_log_path,
+    const std::string& out_idx_path,
     const std::string& grid_npy_path,
     const std::string& traj_csv_path,
-    double duration_sec
-) {
-    if (duration_sec <= 0.0) throw std::runtime_error("duration_sec must be > 0");
-
-    // Frequencies
-    const uint64_t hz_state = 10;
-    const uint64_t hz_pose  = 20;
-    const uint64_t hz_imu   = 50;
-    const uint64_t hz_odom  = 50;
-    const uint64_t hz_slip  = 20;
-    const uint64_t hz_status= 20;
-    const uint64_t hz_map   = 1;
-    const uint64_t hz_scan  = 5;
+    double duration_sec) {
 
     // Load assets
-    auto occ = loadNpyInt16_2D(grid_npy_path);
-    const float res = 0.05f;
-    GridMap grid = gridMapFromOcc(occ, res);
+    const auto occ = loadNpyInt16_2D(grid_npy_path);
+    const auto traj = loadTrajectoryCSV(traj_csv_path);
 
-    auto traj = loadTrajectoryCSV(traj_csv_path);
+    const float res_m = 0.05f;          // assets generator uses 0.05 by default
+    const float origin_x = 0.f;
+    const float origin_y = 0.f;
 
-    // Fixed duration window
-    uint64_t t0 = traj.front().ts;
-    uint64_t t_end = t0 + static_cast<uint64_t>(duration_sec * 1e9);
-    if (t_end > traj.back().ts) t_end = traj.back().ts;
+    const uint64_t t0 = traj.front().ts;
+    const uint64_t t1 = traj.back().ts;
+    const double asset_dur = (t1 > t0) ? double(t1 - t0) / 1e9 : duration_sec;
+    const double dur = (duration_sec > 0) ? std::min(duration_sec, asset_dur) : asset_dur;
+    const uint64_t tend = t0 + static_cast<uint64_t>(dur * 1e9);
 
-    // Noise
-    std::mt19937 rng(42);
-    std::normal_distribution<float> n_pose(0.0f, 0.01f);
-    std::normal_distribution<float> n_ang (0.0f, 0.01f);
-    std::normal_distribution<float> n_imu (0.0f, 0.005f);
-    std::normal_distribution<float> n_scan(0.0f, 0.02f);
-    std::bernoulli_distribution slip_event(0.002);
-    std::bernoulli_distribution bump_event(0.003);
-    std::bernoulli_distribution wheelup_event(0.0008);
-    std::bernoulli_distribution cliff_event(0.0012);
-    std::bernoulli_distribution ir_event(0.01);
+    LogWriter writer(out_log_path);
+    IndexDB idx;
 
-    auto stateAt = [&](double t_sec)->RobotState {
-        if (t_sec < 1.0) return RobotState::selfcheck;
-        if (t_sec < 2.0) return RobotState::findwall;
-        if (t_sec < duration_sec - 3.0) return RobotState::coverage;
-        if (t_sec < duration_sec - 1.0) return RobotState::gohome;
-        return RobotState::end;
-    };
+    // Deterministic RNG
+    std::mt19937 rng(12345);
+    std::uniform_real_distribution<float> uni01(0.f, 1.f);
+    std::normal_distribution<float> n01(0.f, 1.f);
 
-    std::vector<StreamSched> streams = {
-        {TYPE_STATE, periodNsFromHz(hz_state), t0},
-        {TYPE_POSE,  periodNsFromHz(hz_pose),  t0},
-        {TYPE_IMU,   periodNsFromHz(hz_imu),   t0},
-        {TYPE_ODOM,  periodNsFromHz(hz_odom),  t0},
-        {TYPE_SLIP,  periodNsFromHz(hz_slip),  t0},
-        {TYPE_STATUS,periodNsFromHz(hz_status),t0},
-        {TYPE_MAP,   periodNsFromHz(hz_map),   t0},
-        {TYPE_SCAN,  periodNsFromHz(hz_scan),  t0},
-    };
+    // Pre-build constant map (1px per cell)
+    GridMap gmap;
+    gmap.width = occ.cols;
+    gmap.height = occ.rows;
+    gmap.resolution = res_m;
+    gmap.origin_x = origin_x;
+    gmap.origin_y = origin_y;
+    gmap.data.resize(static_cast<size_t>(gmap.width) * static_cast<size_t>(gmap.height));
 
-    LogWriter writer(log_path);
-    IndexDB db;
-
-    PoseSample last_true = samplePoseNearest(traj, t0);
-
-    while (true) {
-        auto it = std::min_element(streams.begin(), streams.end(),
-                                   [](const StreamSched& a, const StreamSched& b){ return a.next_ts < b.next_ts; });
-
-        uint64_t ts = it->next_ts;
-        if (ts >= t_end) break;
-
-        double t_sec = (ts - t0) / 1e9;
-        PoseSample true_pose = samplePoseNearest(traj, ts);
-
-        Record rec;
-
-        switch (it->type) {
-            case TYPE_STATE: {
-                rec = pushRecordData(TYPE_STATE, stateAt(t_sec), ts);
-                break;
-            }
-            case TYPE_POSE: {
-                Pose2D p{};
-                p.x = true_pose.x + n_pose(rng);
-                p.y = true_pose.y + n_pose(rng);
-                p.angle = true_pose.a + n_ang(rng);
-                rec = pushRecordData(TYPE_POSE, p, ts);
-                break;
-            }
-            case TYPE_IMU: {
-                Imu imu{};
-                imu.yaw = true_pose.a + n_imu(rng);
-                imu.pitch = n_imu(rng) * 0.5f;
-                imu.roll  = n_imu(rng) * 0.5f;
-                rec = pushRecordData(TYPE_IMU, imu, ts);
-                break;
-            }
-            case TYPE_ODOM: {
-                Odom od{};
-                od.fuse_pose = Pose2D{true_pose.x, true_pose.y, true_pose.a};
-                od.fuse_pose.x += n_pose(rng) * 0.5f;
-                od.fuse_pose.y += n_pose(rng) * 0.5f;
-                od.fuse_pose.angle += n_ang(rng) * 0.5f;
-
-                float dx = (true_pose.x - last_true.x);
-                float dy = (true_pose.y - last_true.y);
-                float da = (true_pose.a - last_true.a);
-
-                od.raw_pose.x = last_true.x + dx + n_pose(rng) * 1.2f;
-                od.raw_pose.y = last_true.y + dy + n_pose(rng) * 1.2f;
-                od.raw_pose.angle = last_true.a + da + n_ang(rng) * 1.2f;
-
-                rec = pushRecordData(TYPE_ODOM, od, ts);
-                break;
-            }
-            case TYPE_SLIP: {
-                Slip sl{};
-                bool e = slip_event(rng);
-                sl.line_slip = e;
-                sl.rotate_slip = e && (std::fabs(std::sin(true_pose.a)) > 0.5f);
-                rec = pushRecordData(TYPE_SLIP, sl, ts);
-                break;
-            }
-            case TYPE_STATUS: {
-                RobotStatus st{};
-
-                // simple synthetic status pattern (deterministic enough for demo)
-                // exception / motion_state are integer codes
-                st.exception = (bump_event(rng) ? 2u : 0u); // 0: none, 2: bump (demo)
-                st.motion_state = (t_sec < 1.0 ? 0u : (t_sec < duration_sec - 2.0 ? 1u : 2u)); // 0:init 1:run 2:stop
-
-                st.left_bumper  = bump_event(rng);
-                st.right_bumper = bump_event(rng);
-                st.left_wheel_up  = wheelup_event(rng);
-                st.right_wheel_up = wheelup_event(rng);
-
-                st.right_ir = ir_event(rng);
-
-                // approximate commanded velocity from true pose delta
-                float dt = float(it->period_ns) / 1e9f;
-                float dx = float(true_pose.x - last_true.x);
-                float dy = float(true_pose.y - last_true.y);
-                float ds = std::sqrt(dx*dx + dy*dy);
-                float da = float(true_pose.a - last_true.a);
-                st.ctrl_v = (dt > 1e-6f) ? (ds / dt) : 0.0f;
-                st.ctrl_w = (dt > 1e-6f) ? (da / dt) : 0.0f;
-
-                // cliff
-                st.cliff_lr = cliff_event(rng);
-                st.cliff_lf = cliff_event(rng);
-                st.cliff_rf = cliff_event(rng);
-                st.cliff_rr = cliff_event(rng);
-
-                // line slip finer breakdown (demo)
-                st.line_slip_fwd  = slip_event(rng);
-                st.line_slip_back = slip_event(rng);
-
-                // sonar distance: fluctuate within 0.2~2.5m
-                st.sonar = 1.2f + 0.8f * std::sin(float(t_sec) * 0.8f);
-
-                // rotate slip
-                st.rotate_slip_cw  = slip_event(rng);
-                st.rotate_slip_ccw = slip_event(rng);
-
-                // imu derived
-                st.imu_yaw_vel = st.ctrl_w + n_imu(rng) * 0.2f;
-                st.imu_acc_x = n_imu(rng) * 2.0f;
-                st.imu_acc_y = n_imu(rng) * 2.0f;
-                st.imu_acc_z = 9.8f + n_imu(rng) * 1.5f;
-
-                // docking: IR becomes active near end
-                bool near_dock = (t_sec > duration_sec - 1.5);
-                st.dock_ir1 = near_dock && ir_event(rng);
-                st.dock_ir2 = near_dock && ir_event(rng);
-                st.dock_ir3 = near_dock && ir_event(rng);
-                st.dock_ir4 = near_dock && ir_event(rng);
-                st.dock_clip_state = (t_sec > duration_sec - 0.8);
-
-                // battery: 16.8V -> 15.0V linearly
-                float alpha = float(t_sec / duration_sec);
-                st.battery_voltage = 16.8f - alpha * 1.8f;
-
-                rec = pushRecordData(TYPE_STATUS, st, ts);
-                break;
-            }
-            case TYPE_MAP: {
-                rec = pushRecordData(TYPE_MAP, grid, ts);
-                break;
-            }
-            case TYPE_SCAN: {
-                LaserScan scan{};
-                scan.stamp_ns = ts;
-                scan.angle_min = 0.f;
-                scan.angle_increment = static_cast<float>(2.0 * 3.1415926 / 360.0);
-                scan.beams.resize(360);
-
-                // Use occupancy grid raycast so scan aligns with walls (occupied cells)
-                for (int i = 0; i < 360; ++i) {
-                    float ang = scan.angle_min + i * scan.angle_increment + true_pose.a;
-
-                    float d = raycastOccGridDDA(grid, true_pose.x, true_pose.y, ang, 8.0f, 50);
-                    d += n_scan(rng);
-                    scan.beams[i] = std::clamp(d, 0.05f, 8.0f);
-                }
-
-                rec = pushRecordData(TYPE_SCAN, scan, ts);
-                break;
-            }
-            default:
-                throw std::runtime_error("unknown type in generator");
+    // Convert int16(-1/0/100) -> int8(-1/0/100)
+    for (int y = 0; y < gmap.height; ++y) {
+        for (int x = 0; x < gmap.width; ++x) {
+            const int16_t v = occ.data[static_cast<size_t>(y) * static_cast<size_t>(occ.cols) + static_cast<size_t>(x)];
+            int8_t o = 0;
+            if (v < 0) o = -1;
+            else if (v >= 100) o = 100;
+            else o = 0;
+            gmap.data[static_cast<size_t>(y) * static_cast<size_t>(gmap.width) + static_cast<size_t>(x)] = o;
         }
-
-        uint64_t offset = writer.writeRecord(rec);
-        db.all.push_back(IndexItem{rec.timestamp, offset, rec.type});
-
-        it->next_ts += it->period_ns;
-        last_true = true_pose;
     }
 
-    std::sort(db.all.begin(), db.all.end(),
-              [](const IndexItem& a, const IndexItem& b){ return a.timestamp_ns < b.timestamp_ns; });
-    db.buildTypeViews();
-    saveIndex(idx_path, db);
+    auto write = [&](uint32_t type, uint64_t ts, const auto& payload) {
+        Record r;
+        r.type = type;
+        r.timestamp = ts;
+        r.data = serializePayload(payload);
+        r.length = static_cast<uint32_t>(r.data.size());
+
+        const uint64_t off = writer.writeRecord(r);
+        idx.all.push_back(IndexItem{r.timestamp, off, r.type});
+    };
+
+    // Frequencies (per protocol comments)
+    const double hz_clean = 5.0;
+    const double hz_exc   = 5.0;
+    const double hz_motion= 5.0;
+    const double hz_sensor= 50.0;
+    const double hz_map   = 1.0;
+    const double hz_path  = 2.0;   // global/local path updates (low rate)
+    const double hz_pose_rt = 20.0;
+    const double hz_pose_lidar = 6.0;
+    const double hz_lidar = 6.0;
+
+    uint64_t next_clean  = t0;
+    uint64_t next_exc    = t0;
+    uint64_t next_motion = t0;
+    uint64_t next_sensor = t0;
+    uint64_t next_map    = t0;
+    uint64_t next_gpath  = t0;
+    uint64_t next_lpath  = t0;
+    uint64_t next_pose_rt = t0;
+    uint64_t next_pose_lidar = t0;
+    uint64_t next_lidar  = t0;
+
+    const uint64_t step_clean  = static_cast<uint64_t>(1e9 / hz_clean);
+    const uint64_t step_exc    = static_cast<uint64_t>(1e9 / hz_exc);
+    const uint64_t step_motion = static_cast<uint64_t>(1e9 / hz_motion);
+    const uint64_t step_sensor = static_cast<uint64_t>(1e9 / hz_sensor);
+    const uint64_t step_map    = static_cast<uint64_t>(1e9 / hz_map);
+    const uint64_t step_path   = static_cast<uint64_t>(1e9 / hz_path);
+    const uint64_t step_pose_rt= static_cast<uint64_t>(1e9 / hz_pose_rt);
+    const uint64_t step_pose_lidar= static_cast<uint64_t>(1e9 / hz_pose_lidar);
+    const uint64_t step_lidar  = static_cast<uint64_t>(1e9 / hz_lidar);
+
+    // Default states
+    CleanState clean = CleanState::selfcheck;
+    ExceptionCode exc = ExceptionCode::low_power;
+    MotionState motion = MotionState::line;
+
+    // Keep last commanded velocities for motion state synthesis
+    float last_ctrl_v = 0.f;
+    float last_ctrl_w = 0.f;
+
+    // Generate timeline
+    for (uint64_t ts = t0; ts <= tend; ts += 1000000ULL) { // 1ms timebase
+        const double prog = (tend > t0) ? (double(ts - t0) / double(tend - t0)) : 1.0;
+
+        // Map (1Hz)
+        if (ts >= next_map) {
+            write(TYPE_GRID_MAP, ts, gmap);
+            next_map += step_map;
+        }
+
+        // ----- Simulated planner paths (global/local) -----
+        // Keep payload size bounded: downsample by distance + cap points.
+        if (ts >= next_gpath || ts >= next_lpath) {
+            const double tsec = double(ts - t0) / 1e9;
+            size_t idx = static_cast<size_t>(std::llround(tsec * hz_pose_rt));
+            if (idx >= traj.size()) idx = traj.empty() ? 0 : (traj.size() - 1);
+
+            if (ts >= next_gpath) {
+                Pose2DSet gset = buildGlobalPathFromTraj(traj, idx);
+                write(TYPE_GLOBAL_PATH_SET, ts, gset);
+                next_gpath += step_path;
+            }
+            if (ts >= next_lpath) {
+                Pose2DSet lset = buildLocalPathFromTraj(traj, idx);
+                write(TYPE_LOCAL_PATH_SET, ts, lset);
+                next_lpath += step_path;
+            }
+        }
+
+        // Robot realtime pose (20Hz)
+        if (ts >= next_pose_rt) {
+            const PoseSample p = samplePoseAt(traj, ts);
+            Pose2D pose{p.x, p.y, p.a};
+            write(TYPE_ROBOT_REALTIME_POSE, ts, pose);
+            next_pose_rt += step_pose_rt;
+        }
+
+        // Lidar pose (6Hz)
+        if (ts >= next_pose_lidar) {
+            const PoseSample p = samplePoseAt(traj, ts);
+            Pose2D pose{p.x, p.y, p.a};
+            write(TYPE_ROBOT_POSE, ts, pose);
+            next_pose_lidar += step_pose_lidar;
+        }
+
+        // Lidar scan (6Hz)
+        if (ts >= next_lidar) {
+            const PoseSample p = samplePoseAt(traj, ts);
+            LaserScan scan;
+            scan.stamp_ns = ts;
+            scan.angle_min = 0.0f;
+            scan.angle_increment = static_cast<float>(2.0 * M_PI / 360.0);
+            scan.beams.resize(360);
+
+            for (size_t i = 0; i < scan.beams.size(); ++i) {
+                const float ang_world = p.a + scan.angle_min + static_cast<float>(i) * scan.angle_increment;
+                float hx=0.f, hy=0.f;
+                const float rr = raycastGridHit(occ, p.x, p.y, ang_world, origin_x, origin_y, res_m,
+                                                8.0f, true, hx, hy);
+                scan.beams[i] = rr;
+            }
+            write(TYPE_ROBOT_LIDAR, ts, scan);
+            next_lidar += step_lidar;
+        }
+
+        // SensorData (50Hz)
+        if (ts >= next_sensor) {
+            const PoseSample p = samplePoseAt(traj, ts);
+
+            SensorData s;
+
+            // commanded velocity (roughly derive from pose delta)
+            // Use a tiny pseudo derivative over 50ms window.
+            const uint64_t back_ts = (ts > t0 + 50000000ULL) ? (ts - 50000000ULL) : t0;
+            const PoseSample pb = samplePoseAt(traj, back_ts);
+            const float dt = static_cast<float>((ts - back_ts) / 1e9);
+            const float vx = (dt > 1e-6f) ? (p.x - pb.x) / dt : 0.f;
+            const float vy = (dt > 1e-6f) ? (p.y - pb.y) / dt : 0.f;
+            const float v = std::sqrt(vx*vx + vy*vy);
+            float w = (dt > 1e-6f) ? (p.a - pb.a) / dt : 0.f;
+
+            // clamp for UI readability
+            last_ctrl_v = std::min(0.6f, std::max(0.f, v));
+            last_ctrl_w = std::max(-1.0f, std::min(1.0f, w));
+            s.ctrl_v = last_ctrl_v;
+            s.ctrl_w = last_ctrl_w;
+
+            // slips (rare)
+            const float slip_p = 0.002f;
+            s.line_slip_fwd  = (uni01(rng) < slip_p);
+            s.line_slip_back = (uni01(rng) < slip_p);
+            s.rotate_slip_cw  = (uni01(rng) < slip_p);
+            s.rotate_slip_ccw = (uni01(rng) < slip_p);
+
+            // odom: raw has drift, fuse close to pose
+            s.odom.raw_pose.x = p.x + 0.02f * n01(rng);
+            s.odom.raw_pose.y = p.y + 0.02f * n01(rng);
+            s.odom.raw_pose.angle = p.a + 0.02f * n01(rng);
+
+            s.odom.fuse_pose.x = p.x + 0.005f * n01(rng);
+            s.odom.fuse_pose.y = p.y + 0.005f * n01(rng);
+            s.odom.fuse_pose.angle = p.a + 0.005f * n01(rng);
+
+            // imu: small pitch/roll, yaw follows pose
+            s.imu.pitch = 0.02f * n01(rng);
+            s.imu.roll  = 0.02f * n01(rng);
+            s.imu.yaw   = p.a;
+            s.imu.imu_acc_x = 0.2f * n01(rng);
+            s.imu.imu_acc_y = 0.2f * n01(rng);
+            s.imu.imu_acc_z = 9.81f + 0.2f * n01(rng);
+            s.imu.imu_yaw_vel = last_ctrl_w;
+
+            // bumper/wheel-up (very rare)
+            const float bump_p = 0.0008f;
+            s.left_bumper  = (uni01(rng) < bump_p);
+            s.right_bumper = (uni01(rng) < bump_p);
+            s.left_wheel_up  = (uni01(rng) < 0.0003f);
+            s.right_wheel_up = (uni01(rng) < 0.0003f);
+
+            // right IR (wall follow): random-ish at mid phase
+            s.right_ir = (prog > 0.15 && prog < 0.40) ? (uni01(rng) < 0.5f) : (uni01(rng) < 0.05f);
+            s.sonar = 0.20f + 1.0f * uni01(rng);
+
+            // cliff IR (very rare)
+            const float cliff_p = 0.0002f;
+            s.cliff_lr = (uni01(rng) < cliff_p);
+            s.cliff_lf = (uni01(rng) < cliff_p);
+            s.cliff_rf = (uni01(rng) < cliff_p);
+            s.cliff_rr = (uni01(rng) < cliff_p);
+
+            // docking IR: becomes likely near end
+            const float dock_p = (prog > 0.92) ? 0.35f : 0.01f;
+            s.dock_ir1 = (uni01(rng) < dock_p);
+            s.dock_ir2 = (uni01(rng) < dock_p);
+            s.dock_ir3 = (uni01(rng) < dock_p);
+            s.dock_ir4 = (uni01(rng) < dock_p);
+            s.dock_clip_state = (prog > 0.95) ? (uni01(rng) < 0.6f) : false;
+
+            // battery voltage slowly decreases
+            s.battery_voltage = 16.0f - static_cast<float>(2.0 * prog);
+
+            write(TYPE_SENSOR_DATA, ts, s);
+            next_sensor += step_sensor;
+        }
+
+        // Clean state (5Hz)
+        if (ts >= next_clean) {
+            clean = cleanStateAt(prog);
+            write(TYPE_CLEAN_STATE, ts, clean);
+            next_clean += step_clean;
+        }
+
+        // Exception (5Hz) - default none; inject a short transient at ~70%
+        if (ts >= next_exc) {
+            if (prog > 0.70 && prog < 0.72) exc = ExceptionCode::nai_fail;
+            else if (prog > 0.90 && prog < 0.905) exc = ExceptionCode::go_home_fail;
+            else exc = ExceptionCode::low_power;
+            write(TYPE_EXCEPTION_DATA, ts, exc);
+            next_exc += step_exc;
+        }
+
+        // Motion state (5Hz)
+        if (ts >= next_motion) {
+            motion = (std::abs(last_ctrl_w) > 0.5f) ? MotionState::rotate : MotionState::line;
+            if (prog > 0.92) motion = MotionState::dock;
+            write(TYPE_MOTION_STATE, ts, motion);
+            next_motion += step_motion;
+        }
+    }
+
+    std::sort(idx.all.begin(), idx.all.end(), [](const IndexItem& a, const IndexItem& b){ return a.timestamp_ns < b.timestamp_ns; });
+    idx.buildTypeViews();
+    saveIndex(out_idx_path, idx);
 }

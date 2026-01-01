@@ -9,7 +9,6 @@
 #include <limits>
 #include <stdexcept>
 #include <sstream>
-#include <cerrno>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -24,7 +23,7 @@
 #include "log_types.hpp"
 
 // ---------------- trajectory ----------------
-// We build a pose timeline once (startup) and serve trajectory queries from it.
+// Build a pose timeline once (startup) and serve trajectory queries from it.
 struct PoseRec {
     uint64_t ts_ns{0};
     float x{0.f};
@@ -34,7 +33,7 @@ struct PoseRec {
 
 static std::vector<PoseRec> buildPoseTimeline(const IndexDB& db, LogReader& reader) {
     std::vector<PoseRec> poses;
-    auto it = db.by_type.find(TYPE_POSE);
+    auto it = db.by_type.find(TYPE_ROBOT_REALTIME_POSE);
     if (it == db.by_type.end() || it->second.empty()) return poses;
 
     poses.reserve(it->second.size());
@@ -68,7 +67,7 @@ static std::vector<float> buildTrajPrefixXY(const std::vector<PoseRec>& poses,
     if (step_ms == 0) step_ms = 50;
     if (max_points == 0) max_points = 8000;
 
-    const size_t end_idx = lastIndexLE(poses, target_ts);
+    size_t end_idx = lastIndexLE(poses, target_ts);
     const uint64_t step_ns = step_ms * 1000000ULL;
     const uint64_t t0 = poses.front().ts_ns;
     const uint64_t t_end = poses[end_idx].ts_ns;
@@ -115,11 +114,11 @@ static bool ends_with(const std::string& s, const std::string& suffix) {
     return std::equal(suffix.rbegin(), suffix.rend(), s.rbegin());
 }
 
-static bool readFileBinary2(const std::string& path, std::string& out) {
+static std::string readFileBinary(const std::string& path) {
     std::ifstream ifs(path, std::ios::binary);
-    if (!ifs) return false;
-    out.assign((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-    return true;
+    if (!ifs) return "";
+    return std::string((std::istreambuf_iterator<char>(ifs)),
+                       std::istreambuf_iterator<char>());
 }
 
 static std::string contentType(const std::string& path) {
@@ -202,26 +201,28 @@ static std::string makeMetaJson(const IndexDB& db) {
     uint64_t t1 = db.all.empty() ? 0 : db.all.back().timestamp_ns;
     double dur = (t1 > t0) ? double(t1 - t0) / 1e9 : 0.0;
 
-    const bool has_map   = db.by_type.count(TYPE_MAP)   && !db.by_type.at(TYPE_MAP).empty();
-    const bool has_imu   = db.by_type.count(TYPE_IMU)   && !db.by_type.at(TYPE_IMU).empty();
-    const bool has_odom  = db.by_type.count(TYPE_ODOM)  && !db.by_type.at(TYPE_ODOM).empty();
-    const bool has_slip  = db.by_type.count(TYPE_SLIP)  && !db.by_type.at(TYPE_SLIP).empty();
-    const bool has_state = db.by_type.count(TYPE_STATE) && !db.by_type.at(TYPE_STATE).empty();
-    const bool has_status= db.by_type.count(TYPE_STATUS)&& !db.by_type.at(TYPE_STATUS).empty();
+    const bool has_map  = db.by_type.count(TYPE_GRID_MAP)  && !db.by_type.at(TYPE_GRID_MAP).empty();
+    const bool has_pose = db.by_type.count(TYPE_ROBOT_REALTIME_POSE) && !db.by_type.at(TYPE_ROBOT_REALTIME_POSE).empty();
+    const bool has_lidar= db.by_type.count(TYPE_ROBOT_LIDAR) && !db.by_type.at(TYPE_ROBOT_LIDAR).empty();
+    const bool has_clean= db.by_type.count(TYPE_CLEAN_STATE) && !db.by_type.at(TYPE_CLEAN_STATE).empty();
+    const bool has_exception = db.by_type.count(TYPE_EXCEPTION_DATA) && !db.by_type.at(TYPE_EXCEPTION_DATA).empty();
+    const bool has_motion = db.by_type.count(TYPE_MOTION_STATE) && !db.by_type.at(TYPE_MOTION_STATE).empty();
+    const bool has_sensor = db.by_type.count(TYPE_SENSOR_DATA) && !db.by_type.at(TYPE_SENSOR_DATA).empty();
 
     uint64_t map_latest_ts = 0;
-    if (has_map) map_latest_ts = db.by_type.at(TYPE_MAP).back().timestamp_ns;
+    if (has_map) map_latest_ts = db.by_type.at(TYPE_GRID_MAP).back().timestamp_ns;
 
-    return "{"
-        "\"t0_ns\":" + std::to_string(t0) + ","
-        "\"t1_ns\":" + std::to_string(t1) + ","
-        "\"duration_sec\":" + std::to_string(dur) + ","
-        "\"has_map\":" + std::string(has_map ? "true" : "false") + ","
-        "\"has_imu\":" + std::string(has_imu ? "true" : "false") + ","
-        "\"has_odom\":" + std::string(has_odom ? "true" : "false") + ","
-        "\"has_slip\":" + std::string(has_slip ? "true" : "false") + ","
-        "\"has_state\":" + std::string(has_state ? "true" : "false") + ","
-        "\"has_status\":" + std::string(has_status ? "true" : "false") + ","
+    return "{" 
+        "\"t0_ns\":" + std::to_string(t0) + "," 
+        "\"t1_ns\":" + std::to_string(t1) + "," 
+        "\"duration_sec\":" + std::to_string(dur) + "," 
+        "\"has_map\":" + std::string(has_map ? "true" : "false") + "," 
+        "\"has_pose\":" + std::string(has_pose ? "true" : "false") + "," 
+        "\"has_lidar\":" + std::string(has_lidar ? "true" : "false") + "," 
+        "\"has_clean_state\":" + std::string(has_clean ? "true" : "false") + "," 
+        "\"has_exception\":" + std::string(has_exception ? "true" : "false") + "," 
+        "\"has_motion_state\":" + std::string(has_motion ? "true" : "false") + "," 
+        "\"has_sensor_data\":" + std::string(has_sensor ? "true" : "false") + "," 
         "\"map_latest_ts\":" + std::to_string(map_latest_ts) +
     "}";
 }
@@ -243,36 +244,31 @@ static std::string b64encode(const uint8_t* data, size_t len) {
     return out;
 }
 
-static std::string stateToText(uint32_t s) {
-    // Map to logtool's RobotState enum values.
+static std::string cleanStateToText(CleanState s) {
     switch (s) {
-        case 0: return "selfcheck";
-        case 1: return "checkdock";
-        case 2: return "findwall";
-        case 3: return "followwall";
-        case 4: return "coverage";
-        case 5: return "gohome";
-        case 6: return "end";
-        default: return std::to_string(s);
+        case CleanState::selfcheck: return "selfcheck";
+        case CleanState::checkdock: return "checkdock";
+        case CleanState::findwall: return "findwall";
+        case CleanState::followwall: return "followwall";
+        case CleanState::coverage: return "coverage";
+        case CleanState::gohome: return "gohome";
+        case CleanState::end: return "end";
+        default: return std::to_string(static_cast<uint32_t>(s));
     }
 }
 
 // Build /api/frame response compatible with existing web/app.js
 static std::string makeFrameJson(uint64_t target_ts, const IndexDB& db, LogReader& reader) {
-    if (db.all.empty()) return "{\"error\":\"empty log\"}";
-    const uint64_t t0 = db.all.front().timestamp_ns;
-    if (target_ts == 0) target_ts = t0;
-
-    // Pose is the primary timeline for UI. If missing, fallback to scan.
-    const IndexItem* ip = db.nearest(TYPE_POSE, target_ts);
+    // Pose is the primary timeline for UI.
+    const IndexItem* ip = db.nearest(TYPE_ROBOT_REALTIME_POSE, target_ts);
     if (!ip) return "{\"error\":\"no pose\"}";
 
     Record rp = reader.readAt(ip->offset);
     Pose2D pose = parseRecordPayload<Pose2D>(rp);
     const uint64_t pose_ts = rp.timestamp;
 
-    // scan aligned to pose_ts for stable visualization
-    const IndexItem* is = db.nearest(TYPE_SCAN, pose_ts);
+    // lidar scan aligned to pose_ts for stable visualization
+    const IndexItem* is = db.nearest(TYPE_ROBOT_LIDAR, pose_ts);
     LaserScan scan;
     uint64_t scan_ts = 0;
     bool has_scan = false;
@@ -283,140 +279,213 @@ static std::string makeFrameJson(uint64_t target_ts, const IndexDB& db, LogReade
         has_scan = true;
     }
 
-    // optional telemetry
-    bool has_imu = false, has_odom = false, has_slip = false, has_state = false, has_status = false;
-    Imu imu{};
-    Odom odom{};
-    Slip slip{};
-    RobotState state = RobotState::selfcheck;
-    RobotStatus status{};
+    // map for visualization
     uint64_t map_ts = 0;
-
-    if (const IndexItem* ii = db.nearest(TYPE_IMU, pose_ts)) {
-        Record ri = reader.readAt(ii->offset);
-        imu = parseRecordPayload<Imu>(ri);
-        has_imu = true;
-    }
-    if (const IndexItem* io = db.nearest(TYPE_ODOM, pose_ts)) {
-        Record ro = reader.readAt(io->offset);
-        odom = parseRecordPayload<Odom>(ro);
-        has_odom = true;
-    }
-    if (const IndexItem* isl = db.nearest(TYPE_SLIP, pose_ts)) {
-        Record rsl = reader.readAt(isl->offset);
-        slip = parseRecordPayload<Slip>(rsl);
-        has_slip = true;
-    }
-    if (const IndexItem* ist = db.nearest(TYPE_STATE, pose_ts)) {
-        Record rst = reader.readAt(ist->offset);
-        state = parseRecordPayload<RobotState>(rst);
-        has_state = true;
-    }
-    if (const IndexItem* iss2 = db.nearest(TYPE_STATUS, pose_ts)) {
-        Record rs2 = reader.readAt(iss2->offset);
-        status = parseRecordPayload<RobotStatus>(rs2);
-        has_status = true;
-    }
-    if (const IndexItem* im = db.nearest(TYPE_MAP, pose_ts)) {
+    bool has_gpath = false, has_lpath = false;
+    Pose2DSet gpath{};
+    Pose2DSet lpath{};
+    if (const IndexItem* im = db.nearest(TYPE_GRID_MAP, pose_ts)) {
         map_ts = im->timestamp_ns;
     }
 
+    // Optional planner paths (low-rate).
+    if (const IndexItem* ig = db.nearest(TYPE_GLOBAL_PATH_SET, pose_ts)) {
+        Record rg = reader.readAt(ig->offset);
+        gpath = parseRecordPayload<Pose2DSet>(rg);
+        has_gpath = true;
+    }
+    if (const IndexItem* il = db.nearest(TYPE_LOCAL_PATH_SET, pose_ts)) {
+        Record rl = reader.readAt(il->offset);
+        lpath = parseRecordPayload<Pose2DSet>(rl);
+        has_lpath = true;
+    }
+
+    // clean state / exception / motion / sensor
+    bool has_clean = false;
+    CleanState clean_state = CleanState::selfcheck;
+    if (const IndexItem* ist = db.nearest(TYPE_CLEAN_STATE, pose_ts)) {
+        Record rst = reader.readAt(ist->offset);
+        clean_state = parseRecordPayload<CleanState>(rst);
+        has_clean = true;
+    }
+
+    bool has_exception = false;
+    ExceptionCode exception = ExceptionCode::low_power;
+    if (const IndexItem* ie = db.nearest(TYPE_EXCEPTION_DATA, pose_ts)) {
+        Record re = reader.readAt(ie->offset);
+        exception = parseRecordPayload<ExceptionCode>(re);
+        has_exception = true;
+    }
+
+    bool has_motion = false;
+    MotionState motion = MotionState::line;
+    if (const IndexItem* imt = db.nearest(TYPE_MOTION_STATE, pose_ts)) {
+        Record rm = reader.readAt(imt->offset);
+        motion = parseRecordPayload<MotionState>(rm);
+        has_motion = true;
+    }
+
+    bool has_sensor = false;
+    SensorData sensor{};
+    if (const IndexItem* isd = db.nearest(TYPE_SENSOR_DATA, pose_ts)) {
+        Record rsd = reader.readAt(isd->offset);
+        sensor = parseRecordPayload<SensorData>(rsd);
+        has_sensor = true;
+    }
+
+    const uint64_t t0 = db.all.empty() ? 0 : db.all.front().timestamp_ns;
     const double rel_sec = (pose_ts > t0) ? double(pose_ts - t0) / 1e9 : 0.0;
 
     std::string j;
-    j.reserve(96 * 1024);
+    j.reserve(128 * 1024);
     j += "{";
     j += "\"time_text\":\"t0+" + std::to_string(rel_sec) + "s\",";
     j += "\"pose_ts\":" + std::to_string(pose_ts) + ",";
     j += "\"scan_ts\":" + std::to_string(scan_ts) + ",";
     j += "\"map_ts\":" + std::to_string(map_ts) + ",";
+
     j += "\"pose\":{";
     j += "\"x\":" + std::to_string(pose.x) + ",";
     j += "\"y\":" + std::to_string(pose.y) + ",";
     j += "\"yaw\":" + std::to_string(pose.angle) + "},";
 
-    if (has_imu) {
+    // imu: keep old UI contract (pitch/roll/yaw)
+    if (has_sensor) {
         j += "\"imu\":{";
-        j += "\"pitch\":" + std::to_string(imu.pitch) + ",";
-        j += "\"roll\":" + std::to_string(imu.roll) + ",";
-        j += "\"yaw\":" + std::to_string(imu.yaw) + "},";
+        j += "\"pitch\":" + std::to_string(sensor.imu.pitch) + ",";
+        j += "\"roll\":" + std::to_string(sensor.imu.roll) + ",";
+        j += "\"yaw\":" + std::to_string(sensor.imu.yaw) + "},";
     } else {
         j += "\"imu\":null,";
     }
 
-    if (has_odom) {
-        // Backward-compatible "odom" keeps fuse_pose. Also expose raw/fuse explicitly.
+    // Paths: the front-end expects [{x,y}, ...] arrays.
+    if (has_gpath) {
+        j += "\"global_path\":[";
+        bool first = true;
+        for (const auto& p : gpath.pose_set) {
+            if (!first) j += ",";
+            first = false;
+            j += "{\"x\":" + std::to_string(p.x) + ",\"y\":" + std::to_string(p.y) + "}";
+        }
+        j += "],";
+    } else {
+        j += "\"global_path\":null,";
+    }
+
+    if (has_lpath) {
+        j += "\"local_path\":[";
+        bool first = true;
+        for (const auto& p : lpath.pose_set) {
+            if (!first) j += ",";
+            first = false;
+            j += "{\"x\":" + std::to_string(p.x) + ",\"y\":" + std::to_string(p.y) + "}";
+        }
+        j += "],";
+    } else {
+        j += "\"local_path\":null,";
+    }
+
+    // odom: keep old UI contract as fused pose
+    if (has_sensor) {
         j += "\"odom\":{";
-        j += "\"x\":" + std::to_string(odom.fuse_pose.x) + ",";
-        j += "\"y\":" + std::to_string(odom.fuse_pose.y) + ",";
-        j += "\"yaw\":" + std::to_string(odom.fuse_pose.angle) + "},";
+        j += "\"x\":" + std::to_string(sensor.odom.fuse_pose.x) + ",";
+        j += "\"y\":" + std::to_string(sensor.odom.fuse_pose.y) + ",";
+        j += "\"yaw\":" + std::to_string(sensor.odom.fuse_pose.angle) + "},";
 
         j += "\"odom_raw\":{";
-        j += "\"x\":" + std::to_string(odom.raw_pose.x) + ",";
-        j += "\"y\":" + std::to_string(odom.raw_pose.y) + ",";
-        j += "\"yaw\":" + std::to_string(odom.raw_pose.angle) + "},";
+        j += "\"x\":" + std::to_string(sensor.odom.raw_pose.x) + ",";
+        j += "\"y\":" + std::to_string(sensor.odom.raw_pose.y) + ",";
+        j += "\"yaw\":" + std::to_string(sensor.odom.raw_pose.angle) + "},";
 
         j += "\"odom_fuse\":{";
-        j += "\"x\":" + std::to_string(odom.fuse_pose.x) + ",";
-        j += "\"y\":" + std::to_string(odom.fuse_pose.y) + ",";
-        j += "\"yaw\":" + std::to_string(odom.fuse_pose.angle) + "},";
+        j += "\"x\":" + std::to_string(sensor.odom.fuse_pose.x) + ",";
+        j += "\"y\":" + std::to_string(sensor.odom.fuse_pose.y) + ",";
+        j += "\"yaw\":" + std::to_string(sensor.odom.fuse_pose.angle) + "},";
     } else {
         j += "\"odom\":null,";
         j += "\"odom_raw\":null,";
         j += "\"odom_fuse\":null,";
     }
 
-    if (has_slip) {
-        int slip_any = (slip.line_slip || slip.rotate_slip) ? 1 : 0;
+    // slip (legacy): if any slip flags -> 1
+    if (has_sensor) {
+        int slip_any = (sensor.line_slip_fwd || sensor.line_slip_back || sensor.rotate_slip_cw || sensor.rotate_slip_ccw) ? 1 : 0;
         j += "\"slip\":" + std::to_string(slip_any) + ",";
     } else {
         j += "\"slip\":null,";
     }
 
-    if (has_state) {
-        j += "\"state\":\"" + stateToText(static_cast<uint32_t>(state)) + "\",";
+    // state string
+    if (has_clean) {
+        j += "\"state\":\"" + cleanStateToText(clean_state) + "\",";
     } else {
         j += "\"state\":null,";
     }
 
-    if (has_status) {
-        j += "\"exception\":" + std::to_string(status.exception) + ",";
-        j += "\"motion_state\":" + std::to_string(status.motion_state) + ",";
+    // exception & motion_state (legacy top-bar fields)
+    if (has_exception) j += "\"exception\":" + std::to_string(static_cast<uint32_t>(exception)) + ",";
+    else j += "\"exception\":null,";
+
+    if (has_motion) j += "\"motion_state\":" + std::to_string(static_cast<uint32_t>(motion)) + ",";
+    else j += "\"motion_state\":null,";
+
+    // status object for right-side panel
+    if (has_sensor) {
         j += "\"status\":{";
-        j += "\"left_bumper\":" + std::string(status.left_bumper ? "true" : "false") + ",";
-        j += "\"right_bumper\":" + std::string(status.right_bumper ? "true" : "false") + ",";
-        j += "\"left_wheel_up\":" + std::string(status.left_wheel_up ? "true" : "false") + ",";
-        j += "\"right_wheel_up\":" + std::string(status.right_wheel_up ? "true" : "false") + ",";
-        j += "\"right_ir\":" + std::string(status.right_ir ? "true" : "false") + ",";
-        j += "\"ctrl_v\":" + std::to_string(status.ctrl_v) + ",";
-        j += "\"ctrl_w\":" + std::to_string(status.ctrl_w) + ",";
-        j += "\"cliff_lr\":" + std::string(status.cliff_lr ? "true" : "false") + ",";
-        j += "\"cliff_lf\":" + std::string(status.cliff_lf ? "true" : "false") + ",";
-        j += "\"cliff_rf\":" + std::string(status.cliff_rf ? "true" : "false") + ",";
-        j += "\"cliff_rr\":" + std::string(status.cliff_rr ? "true" : "false") + ",";
-        j += "\"line_slip_fwd\":" + std::string(status.line_slip_fwd ? "true" : "false") + ",";
-        j += "\"line_slip_back\":" + std::string(status.line_slip_back ? "true" : "false") + ",";
-        j += "\"sonar\":" + std::to_string(status.sonar) + ",";
-        j += "\"rotate_slip_cw\":" + std::string(status.rotate_slip_cw ? "true" : "false") + ",";
-        j += "\"rotate_slip_ccw\":" + std::string(status.rotate_slip_ccw ? "true" : "false") + ",";
-        j += "\"imu_yaw_vel\":" + std::to_string(status.imu_yaw_vel) + ",";
-        j += "\"imu_acc_x\":" + std::to_string(status.imu_acc_x) + ",";
-        j += "\"imu_acc_y\":" + std::to_string(status.imu_acc_y) + ",";
-        j += "\"imu_acc_z\":" + std::to_string(status.imu_acc_z) + ",";
-        j += "\"dock_ir1\":" + std::string(status.dock_ir1 ? "true" : "false") + ",";
-        j += "\"dock_ir2\":" + std::string(status.dock_ir2 ? "true" : "false") + ",";
-        j += "\"dock_ir3\":" + std::string(status.dock_ir3 ? "true" : "false") + ",";
-        j += "\"dock_ir4\":" + std::string(status.dock_ir4 ? "true" : "false") + ",";
-        j += "\"dock_clip_state\":" + std::string(status.dock_clip_state ? "true" : "false") + ",";
-        j += "\"battery_voltage\":" + std::to_string(status.battery_voltage);
+        j += "\"left_bumper\":" + std::string(sensor.left_bumper ? "true" : "false") + ",";
+        j += "\"right_bumper\":" + std::string(sensor.right_bumper ? "true" : "false") + ",";
+        j += "\"left_wheel_up\":" + std::string(sensor.left_wheel_up ? "true" : "false") + ",";
+        j += "\"right_wheel_up\":" + std::string(sensor.right_wheel_up ? "true" : "false") + ",";
+        j += "\"right_ir\":" + std::string(sensor.right_ir ? "true" : "false") + ",";
+        j += "\"ctrl_v\":" + std::to_string(sensor.ctrl_v) + ",";
+        j += "\"ctrl_w\":" + std::to_string(sensor.ctrl_w) + ",";
+        j += "\"cliff_lr\":" + std::string(sensor.cliff_lr ? "true" : "false") + ",";
+        j += "\"cliff_lf\":" + std::string(sensor.cliff_lf ? "true" : "false") + ",";
+        j += "\"cliff_rf\":" + std::string(sensor.cliff_rf ? "true" : "false") + ",";
+        j += "\"cliff_rr\":" + std::string(sensor.cliff_rr ? "true" : "false") + ",";
+        j += "\"line_slip_fwd\":" + std::string(sensor.line_slip_fwd ? "true" : "false") + ",";
+        j += "\"line_slip_back\":" + std::string(sensor.line_slip_back ? "true" : "false") + ",";
+        j += "\"sonar\":" + std::to_string(sensor.sonar) + ",";
+        j += "\"rotate_slip_cw\":" + std::string(sensor.rotate_slip_cw ? "true" : "false") + ",";
+        j += "\"rotate_slip_ccw\":" + std::string(sensor.rotate_slip_ccw ? "true" : "false") + ",";
+        j += "\"imu_yaw_vel\":" + std::to_string(sensor.imu.imu_yaw_vel) + ",";
+        j += "\"imu_acc_x\":" + std::to_string(sensor.imu.imu_acc_x) + ",";
+        j += "\"imu_acc_y\":" + std::to_string(sensor.imu.imu_acc_y) + ",";
+        j += "\"imu_acc_z\":" + std::to_string(sensor.imu.imu_acc_z) + ",";
+        j += "\"dock_ir1\":" + std::string(sensor.dock_ir1 ? "true" : "false") + ",";
+        j += "\"dock_ir2\":" + std::string(sensor.dock_ir2 ? "true" : "false") + ",";
+        j += "\"dock_ir3\":" + std::string(sensor.dock_ir3 ? "true" : "false") + ",";
+        j += "\"dock_ir4\":" + std::string(sensor.dock_ir4 ? "true" : "false") + ",";
+        j += "\"dock_clip_state\":" + std::string(sensor.dock_clip_state ? "true" : "false") + ",";
+        j += "\"battery_voltage\":" + std::to_string(sensor.battery_voltage);
         j += "},";
     } else {
-        j += "\"exception\":null,";
-        j += "\"motion_state\":null,";
         j += "\"status\":null,";
     }
 
-    // points in robot-local frame
+    // planner paths (optional; UI layer toggles will ignore when null)
+    auto appendPath = [&](const char* key, const Pose2DSet& ps, bool has){
+        j += "\"";
+        j += key;
+        j += "\":";
+        if (!has || ps.pose_set.empty()) {
+            j += "null,";
+            return;
+        }
+        j += "[";
+        bool first = true;
+        for (const auto& p : ps.pose_set) {
+            if (!first) j += ",";
+            first = false;
+            j += "{\"x\":" + std::to_string(p.x) + ",\"y\":" + std::to_string(p.y) + "}";
+        }
+        j += "],";
+    };
+    appendPath("global_path", gpath, has_gpath);
+    appendPath("local_path",  lpath, has_lpath);
+
+    // points in robot-local frame (for UI)
     j += "\"points\":[";
     if (has_scan) {
         bool first = true;
@@ -431,16 +500,13 @@ static std::string makeFrameJson(uint64_t target_ts, const IndexDB& db, LogReade
         }
     }
     j += "]";
+
     j += "}";
     return j;
 }
 
 static std::string makeMapJson(uint64_t target_ts, const IndexDB& db, LogReader& reader) {
-    if (db.all.empty()) return "{\"error\":\"empty log\"}";
-    const uint64_t t0 = db.all.front().timestamp_ns;
-    if (target_ts == 0) target_ts = t0;
-
-    const IndexItem* im = db.nearest(TYPE_MAP, target_ts);
+    const IndexItem* im = db.nearest(TYPE_GRID_MAP, target_ts);
     if (!im) return "{\"error\":\"no map\"}";
     Record rm = reader.readAt(im->offset);
     GridMap map = parseRecordPayload<GridMap>(rm);
@@ -466,23 +532,12 @@ static std::string makeMapJson(uint64_t target_ts, const IndexDB& db, LogReader&
 static std::string makeTrajJson(uint64_t target_ts,
                                 uint64_t step_ms,
                                 size_t max_points,
-                                const IndexDB& db,
                                 const std::vector<PoseRec>& poses) {
     if (poses.empty()) return "{\"error\":\"no pose\"}";
-    if (db.all.empty()) return "{\"error\":\"empty log\"}";
-
-    const uint64_t t0 = db.all.front().timestamp_ns;
-    if (target_ts == 0) target_ts = t0;
-
     if (step_ms == 0) step_ms = 50;
     if (max_points == 0) max_points = 8000;
 
-    // Clamp target_ts into pose timeline range for stability.
-    uint64_t ts_clamped = target_ts;
-    if (ts_clamped < poses.front().ts_ns) ts_clamped = poses.front().ts_ns;
-    if (ts_clamped > poses.back().ts_ns)  ts_clamped = poses.back().ts_ns;
-
-    std::vector<float> xy = buildTrajPrefixXY(poses, ts_clamped, step_ms, max_points);
+    std::vector<float> xy = buildTrajPrefixXY(poses, target_ts, step_ms, max_points);
     const uint8_t* raw = reinterpret_cast<const uint8_t*>(xy.data());
     const size_t raw_len = xy.size() * sizeof(float);
     std::string b64 = b64encode(raw, raw_len);
@@ -491,7 +546,7 @@ static std::string makeTrajJson(uint64_t target_ts,
     j.reserve(b64.size() + 256);
     j += "{";
     j += "\"t0_ns\":" + std::to_string(poses.front().ts_ns) + ",";
-    j += "\"t1_ns\":" + std::to_string(ts_clamped) + ",";
+    j += "\"t1_ns\":" + std::to_string(target_ts) + ",";
     j += "\"step_ms\":" + std::to_string(step_ms) + ",";
     j += "\"count\":" + std::to_string(xy.size() / 2) + ",";
     j += "\"xy_f32_b64\":\"" + b64 + "\"";
@@ -528,20 +583,6 @@ static bool readHttpRequest(int fd, HttpRequest& out) {
     return !out.method.empty() && !out.target.empty();
 }
 
-static bool sendAll(int fd, const char* data, size_t len) {
-    size_t off = 0;
-    while (off < len) {
-        ssize_t n = ::send(fd, data + off, len - off, 0);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return false;
-        }
-        if (n == 0) return false;
-        off += static_cast<size_t>(n);
-    }
-    return true;
-}
-
 static void sendHttpResponse(int fd, int status, const std::string& content_type, const std::string& body) {
     std::string status_text = "OK";
     if (status == 404) status_text = "Not Found";
@@ -554,44 +595,26 @@ static void sendHttpResponse(int fd, int status, const std::string& content_type
     oss << "Content-Length: " << body.size() << "\r\n";
     oss << "Connection: close\r\n";
     oss << "\r\n";
+    std::string header = oss.str();
 
-    const std::string header = oss.str();
-    (void)sendAll(fd, header.data(), header.size());
-    if (!body.empty()) (void)sendAll(fd, body.data(), body.size());
+    ::send(fd, header.data(), header.size(), 0);
+    if (!body.empty()) ::send(fd, body.data(), body.size(), 0);
 }
 
-// strict query parsing: split by '&', key must match exactly
-static bool queryGet(const std::string& target, const std::string& key, std::string& val_out) {
-    const auto qpos = target.find('?');
-    if (qpos == std::string::npos) return false;
-    const std::string q = target.substr(qpos + 1);
-
-    size_t i = 0;
-    while (i < q.size()) {
-        size_t amp = q.find('&', i);
-        if (amp == std::string::npos) amp = q.size();
-        const std::string kv = q.substr(i, amp - i);
-        const size_t eq = kv.find('=');
-        if (eq != std::string::npos) {
-            const std::string k = kv.substr(0, eq);
-            if (k == key) {
-                val_out = kv.substr(eq + 1);
-                return true;
-            }
-        }
-        i = amp + 1;
-    }
-    return false;
-}
-
-static uint64_t queryGetU64(const std::string& target, const std::string& key, uint64_t def=0) {
-    std::string v;
-    if (!queryGet(target, key, v) || v.empty()) return def;
-    return static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
+static std::string getQueryParamU64(const std::string& target, const std::string& key) {
+    auto qpos = target.find('?');
+    if (qpos == std::string::npos) return "";
+    std::string q = target.substr(qpos + 1);
+    auto kpos = q.find(key + "=");
+    if (kpos == std::string::npos) return "";
+    kpos += key.size() + 1;
+    auto end = q.find('&', kpos);
+    std::string val = (end == std::string::npos) ? q.substr(kpos) : q.substr(kpos, end - kpos);
+    return val;
 }
 
 int main(int argc, char** argv) {
-    signal(SIGPIPE, SIG_IGN);   // avoid Broken pipe killing the process
+    signal(SIGPIPE, SIG_IGN);   // 关键：避免 Broken pipe 直接杀进程
     try {
         std::string log_path = "data/fake_cleaning.log";
         std::string web_root = "web";
@@ -650,7 +673,7 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            const std::string target = req.target;
+            std::string target = req.target;
 
             // API
             if (target == "/api/meta") {
@@ -660,7 +683,9 @@ int main(int argc, char** argv) {
             }
 
             if (target.rfind("/api/frame", 0) == 0) {
-                const uint64_t ts = queryGetU64(target, "ts_ns", 0);
+                uint64_t ts = 0;
+                std::string v = getQueryParamU64(target, "ts_ns");
+                if (!v.empty()) ts = static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
                 std::string body = makeFrameJson(ts, db, reader);
                 sendHttpResponse(client_fd, 200, "application/json; charset=utf-8", body);
                 ::close(client_fd);
@@ -668,7 +693,9 @@ int main(int argc, char** argv) {
             }
 
             if (target.rfind("/api/map", 0) == 0) {
-                const uint64_t ts = queryGetU64(target, "ts_ns", 0);
+                uint64_t ts = 0;
+                std::string v = getQueryParamU64(target, "ts_ns");
+                if (!v.empty()) ts = static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
                 std::string body = makeMapJson(ts, db, reader);
                 sendHttpResponse(client_fd, 200, "application/json; charset=utf-8", body);
                 ::close(client_fd);
@@ -676,11 +703,18 @@ int main(int argc, char** argv) {
             }
 
             if (target.rfind("/api/traj", 0) == 0) {
-                const uint64_t ts = queryGetU64(target, "ts_ns", 0);
-                const uint64_t step_ms = queryGetU64(target, "step_ms", 50);
-                const size_t max_points = static_cast<size_t>(queryGetU64(target, "max_points", 8000));
+                uint64_t ts = 0;
+                uint64_t step_ms = 50;
+                size_t max_points = 8000;
 
-                std::string body = makeTrajJson(ts, step_ms, max_points, db, poses);
+                std::string v = getQueryParamU64(target, "ts_ns");
+                if (!v.empty()) ts = static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
+                v = getQueryParamU64(target, "step_ms");
+                if (!v.empty()) step_ms = static_cast<uint64_t>(std::strtoull(v.c_str(), nullptr, 10));
+                v = getQueryParamU64(target, "max_points");
+                if (!v.empty()) max_points = static_cast<size_t>(std::strtoull(v.c_str(), nullptr, 10));
+
+                std::string body = makeTrajJson(ts, step_ms, max_points, poses);
                 sendHttpResponse(client_fd, 200, "application/json; charset=utf-8", body);
                 ::close(client_fd);
                 continue;
@@ -695,15 +729,13 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            const std::string full = web_root + path;
-
-            std::string body;
-            if (!readFileBinary2(full, body)) {
+            std::string full = web_root + path;
+            std::string body = readFileBinary(full);
+            if (body.empty()) {
                 sendHttpResponse(client_fd, 404, "text/plain; charset=utf-8", "404 Not Found");
                 ::close(client_fd);
                 continue;
             }
-
             sendHttpResponse(client_fd, 200, contentType(full), body);
             ::close(client_fd);
         }

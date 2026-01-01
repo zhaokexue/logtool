@@ -10,12 +10,25 @@
   --shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
   --shadow-soft: 0 6px 16px rgba(15, 23, 42, 0.06);
   --radius: 14px;
+
+  /* 全局密度调参：高度越小，自动更紧凑 */
+  --pad-app-x: 12px;
+  --pad-app-y: 10px;
+  --gap: 10px;
+
+  /* timeline 固定高度（确保始终可见） */
+  --timeline-h: 64px;
 }
 
-html, body{ height:100%; }
+html, body{
+  height:100%;
+  width:100%;
+}
 
 body{
   margin:0;
+  overflow: hidden; /* 关键：不让页面整体出现滚动条 */
+
   background: radial-gradient(1200px 600px at 10% 0%, rgba(37, 99, 235, 0.10), transparent 55%),
               radial-gradient(900px 600px at 95% 10%, rgba(16, 185, 129, 0.08), transparent 50%),
               var(--bg);
@@ -25,22 +38,36 @@ body{
 
 *{ box-sizing:border-box; }
 
+/* =========================
+   全屏三段式布局（关键）
+   toolbar（自适应高）
+   main（吃剩余全部）
+   timeline（固定高且可见）
+   ========================= */
 .app{
-  max-width: 1480px;
-  margin: 18px auto;
-  padding: 14px;
+  width: 100vw;
+  height: 100vh;         /* 关键：全屏高度 */
+  max-width: none;
+  margin: 0;
+  padding: var(--pad-app-y) var(--pad-app-x);
+
+  display:flex;          /* 关键：三段式 */
+  flex-direction: column;
+  gap: var(--gap);
 }
 
 /* ---------------- Top toolbar ---------------- */
 .toolbar{
   display:flex;
-  gap: 12px;
+  gap: 10px;
   align-items: center;
-  padding: 12px;
+  padding: 10px;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+
+  flex: 0 0 auto;
 }
 
 .toolbar-left{ display:flex; gap:10px; align-items:center; }
@@ -125,42 +152,66 @@ body{
 }
 
 /* ---------------- Main layout ---------------- */
+/* 关键：main 吃掉除 toolbar/timeline 外的所有高度 */
 .main{
+  flex: 1 1 auto;
+  min-height: 0; /* 关键：允许内部正确收缩，不把 timeline 挤出屏幕 */
+
   display:grid;
-  grid-template-columns: 1fr 340px;
-  gap: 14px;
-  margin-top: 14px;
+  grid-template-columns: 1fr clamp(300px, 22vw, 380px);
+  gap: var(--gap);
+  align-items: stretch;
 }
 
+/* viewer：列布局，canvas 吃高度，hint 固定在下 */
 .viewer{
   position: relative;
-  padding: 12px;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+
+  padding: 10px;
+
+  display:flex;
+  flex-direction: column;
+  min-height: 0; /* 关键 */
 }
 
 #canvas{
   width: 100%;
-  height: auto;
+  height: 100%;      /* 关键：填充 viewer 可用高度 */
+  flex: 1 1 auto;    /* 关键：canvas 吃剩余高度 */
   display:block;
   border-radius: 12px;
   border: 1px solid rgba(15,23,42,0.12);
   background: #303030;
 }
 
+/* hint 在最下方，保持可见 */
 .viewer-hint{
-  margin-top: 10px;
+  flex: 0 0 auto;
+  margin-top: 8px;
   color: var(--muted);
   font-size: 12px;
+
+  display:flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.viewer-hint-right{ white-space: nowrap; }
+
+.viewer-hint .mono{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
 /* ---------- Overlay controls (V3) ---------- */
 .viewer-overlay{
   position: absolute;
-  top: 14px;
-  left: 14px;
+  top: 12px;
+  left: 12px;
   padding: 10px;
   background: rgba(255,255,255,0.82);
   border: 1px solid rgba(15,23,42,0.14);
@@ -242,54 +293,23 @@ body{
 }
 
 /* ---------------- Info panel ---------------- */
+/* 关键：不允许右侧出现内部滚动条；不够用就“缩小显示密度” */
 .info{
-  padding: 12px;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-}
 
-.kvtable{
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-}
-
-.kvtable td{
-  padding: 10px 10px;
-  vertical-align: middle;
-  border-bottom: 1px solid rgba(15,23,42,0.08);
-  font-size: 13px;
-}
-
-.kvtable tr:last-child td{ border-bottom: none; }
-
-.kvtable td.k{
-  width: 110px;
-  color: rgba(15,23,42,0.70);
-  font-weight: 800;
-}
-
-.kvtable td.v{
-  width: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  font-size: 12px;
-  color: rgba(15,23,42,0.88);
-}
-
-
-/* ---------------- Info panel (V3 UI polish) ---------------- */
-.info{
   padding: 0;
-  overflow: hidden;
+  overflow: hidden;        /* 禁止滚动条 */
   display:flex;
   flex-direction: column;
-  min-height: 240px;
+  min-height: 0;           /* 关键：允许被压缩 */
 }
 
 .info-head{
-  padding: 12px 12px 10px;
+  flex: 0 0 auto;
+  padding: 10px 12px 8px;
   border-bottom: 1px solid var(--border);
   display:flex;
   align-items: baseline;
@@ -308,18 +328,24 @@ body{
   color: var(--muted);
 }
 
+/* 关键：取消 overflow:auto，改为压缩密度以适配高度 */
 .info-body{
-  padding: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+
+  padding: 10px 12px;
   display:flex;
   flex-direction: column;
-  gap: 12px;
-  overflow: auto;
+  gap: 10px;
+
+  overflow: hidden; /* 禁止右侧滚动条 */
 }
 
+/* 信息区块更紧凑 */
 .info-sec{
   border: 1px solid rgba(148,163,184,0.45);
   border-radius: 12px;
-  padding: 10px;
+  padding: 8px;
   background: rgba(255,255,255,0.72);
 }
 
@@ -328,10 +354,11 @@ body{
   font-weight: 900;
   color: rgba(15,23,42,0.72);
   letter-spacing: 0.6px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   text-transform: uppercase;
 }
 
+/* 两列展示，减少纵向高度消耗 */
 .kvgrid{
   display:grid;
   grid-template-columns: 1fr 1fr;
@@ -341,7 +368,7 @@ body{
 .kv{
   border: 1px solid rgba(148,163,184,0.35);
   border-radius: 10px;
-  padding: 8px 9px;
+  padding: 7px 8px;
   background: rgba(255,255,255,0.55);
 }
 
@@ -351,14 +378,14 @@ body{
   font-size: 11px;
   color: rgba(15,23,42,0.62);
   font-weight: 800;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
 }
 
 .kv .v{
   font-size: 12px;
   color: rgba(15,23,42,0.88);
   font-weight: 800;
-  line-height: 1.35;
+  line-height: 1.30;
   word-break: break-word;
 }
 
@@ -366,20 +393,29 @@ body{
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
-/* ---------------- Timeline ---------------- */
+/* =========================
+   timeline：固定高度，始终可见
+   ========================= */
 .timeline{
-  margin-top: 0px;  /* move timeline further up */
-  padding: 8px 12px 10px 12px;
+  flex: 0 0 var(--timeline-h);
+  height: var(--timeline-h);
+
+  padding: 8px 10px 10px 10px;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+
+  display:flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
 }
 
 #slider{
   width: 100%;
   height: 4px;
-  margin: 0; /* slider up and keep bottom edge clean */
+  margin: 0;
 }
 
 .timeline-footer{
@@ -387,11 +423,11 @@ body{
   justify-content:space-between;
   font-size: 12px;
   color: var(--muted);
-  padding-top: 10px;
 }
 
 /* ---------------- Responsive ---------------- */
 @media (max-width: 1100px){
+  /* 竖屏或小屏：信息栏下移，但 timeline 仍在底部可见 */
   .main{ grid-template-columns: 1fr; }
 }
 
@@ -402,18 +438,30 @@ body{
   .viewer-overlay{ position: static; margin: 10px 0 0 0; }
 }
 
-/* Put mouse world coord at the right side of viewer-hint line */
-.viewer-hint{
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+/* =========================
+   高度不足时自动缩小信息密度（你要求“不够用就缩小显示”）
+   ========================= */
+@media (max-height: 860px){
+  :root{
+    --timeline-h: 58px;
+    --pad-app-y: 8px;
+    --pad-app-x: 10px;
+    --gap: 8px;
+  }
+  .toolbar{ padding: 9px; }
+  .viewer{ padding: 9px; }
+  .info-body{ padding: 9px 10px; gap: 8px; }
+  .info-sec{ padding: 7px; }
+  .kv{ padding: 6px 7px; }
+  .kv .v{ font-size: 11px; line-height: 1.25; }
 }
 
-.viewer-hint-right{
-  white-space: nowrap;
-}
-
-.viewer-hint .mono{
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+@media (max-height: 760px){
+  :root{
+    --timeline-h: 54px;
+  }
+  .kvgrid{ gap: 7px 8px; }
+  .sec-title{ margin-bottom: 5px; }
+  .kv .k{ font-size: 10px; }
+  .kv .v{ font-size: 11px; }
 }

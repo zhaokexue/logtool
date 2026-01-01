@@ -503,6 +503,62 @@ function setCamOffsetForAnchor(wx, wy, sx, sy){
   cam.offsetY = sy + ry * cam.scale;
 }
 
+// ======================
+// Canvas resize (CRITICAL)
+// Make canvas.width/height match its CSS display size * devicePixelRatio.
+// Otherwise fit/scale uses wrong w/h and you will see huge unused areas.
+// ======================
+function resizeCanvasToDisplaySize(preserveCenter=true){
+  if (!canvas) return false;
+
+  // preserve current view center world point
+  let centerW = null;
+  if (preserveCenter && canvas.width > 0 && canvas.height > 0){
+    centerW = screenToWorld(canvas.width/2, canvas.height/2);
+  }
+
+  const rect = canvas.getBoundingClientRect();
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+
+  const newW = Math.max(2, Math.round(rect.width * dpr));
+  const newH = Math.max(2, Math.round(rect.height * dpr));
+
+  if (canvas.width === newW && canvas.height === newH) return false;
+
+  canvas.width = newW;
+  canvas.height = newH;
+
+  // keep same world center at new canvas center
+  if (centerW){
+    setCamOffsetForAnchor(centerW.x, centerW.y, canvas.width/2, canvas.height/2);
+  } else {
+    cam.offsetX = canvas.width/2;
+    cam.offsetY = canvas.height/2;
+  }
+
+  return true;
+}
+
+let _canvasRO = null;
+function initCanvasResizeObserver(){
+  if (!canvas) return;
+
+  // initial sync
+  resizeCanvasToDisplaySize(false);
+
+  if (_canvasRO) try { _canvasRO.disconnect(); } catch(_) {}
+  _canvasRO = new ResizeObserver(()=>{
+    const changed = resizeCanvasToDisplaySize(true);
+    if (changed && lastFrame) render(lastFrame);
+  });
+  _canvasRO.observe(canvas);
+
+  window.addEventListener('resize', ()=>{
+    const changed = resizeCanvasToDisplaySize(true);
+    if (changed && lastFrame) render(lastFrame);
+  });
+}
+
 function pickNiceStepMeters(targetMeters){
   // choose from a 1-2-5 series (and decades)
   const base = [1,2,5];
@@ -554,16 +610,11 @@ function drawRvizGrid(){
   ctx.save();
 
   // ---------------- RViz-like gray theme ----------------
-  // Assumed canvas bg is light gray (e.g. #e6e6e6 in CSS).
-  // Minor grid: very light gray (still distinguishable from bg)
-  // Major grid: slightly darker gray
-  const minorStroke = 'rgba(255,255,255,0.12)';  // was 0.08 (too faint on gray bg)
-  const majorStroke = 'rgba(255,255,255,0.18)';  // was 0.18
-  const labelFill   = 'rgba(255,255,255,0.55)';  // softer than before (0.55)
+  const minorStroke = 'rgba(255,255,255,0.12)';
+  const majorStroke = 'rgba(255,255,255,0.18)';
+  const labelFill   = 'rgba(255,255,255,0.55)';
 
   // minor
-  // NOTE: after adding rotation, grid lines must be drawn by endpoints in world,
-  // not by assuming screen-aligned X/Y.
   if (showMinor){
     ctx.strokeStyle = minorStroke;
     ctx.lineWidth = 1;
@@ -595,8 +646,7 @@ function drawRvizGrid(){
     ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke();
   }
 
-  // coordinate labels on major grid (lightweight, edges only)
-  // NOTE: under rotation, "edges only" is not as meaningful; keep it lightweight and correct numerically.
+  // coordinate labels on major grid
   ctx.fillStyle = labelFill;
   ctx.font = '12px system-ui, sans-serif';
   ctx.textBaseline = 'top';
@@ -693,19 +743,78 @@ function computeBoundsFromTrajOrPose(frame){
   return {minx:minx-pad, maxx:maxx+pad, miny:miny-pad, maxy:maxy+pad};
 }
 
-function fitCameraToBounds(b){
+// Fit modes:
+// - 'contain' : show all (may leave black bars)   => old behavior
+// - 'fitWidth': fill width as much as possible, allow vertical cropping (recommended)
+// - 'cover'   : fill both directions, crop whichever exceeds
+const DEFAULT_FIT_MODE = 'fitWidth';
+
+function boundsToCameraAABB(b){
+  // Convert world AABB -> camera-space AABB (consider cam.rot)
+  const c = Math.cos(cam.rot);
+  const s = Math.sin(cam.rot);
+
+  const corners = [
+    {x: b.minx, y: b.miny},
+    {x: b.minx, y: b.maxy},
+    {x: b.maxx, y: b.miny},
+    {x: b.maxx, y: b.maxy},
+  ];
+
+  let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+  for (const p of corners){
+    // world -> camera rotate
+    const rx = c * p.x - s * p.y;
+    const ry = s * p.x + c * p.y;
+    minx = Math.min(minx, rx); maxx = Math.max(maxx, rx);
+    miny = Math.min(miny, ry); maxy = Math.max(maxy, ry);
+  }
+  return {minx, maxx, miny, maxy};
+}
+
+function fitCameraToBounds(b, mode = DEFAULT_FIT_MODE){
   if (!b) return;
+
+  // Ensure canvas pixel size is correct before fitting
+  resizeCanvasToDisplaySize(true);
+
   const w = canvas.width, h = canvas.height;
-  const margin = 40;
-  const dx = Math.max(1e-6, b.maxx - b.minx);
-  const dy = Math.max(1e-6, b.maxy - b.miny);
-  const sx = (w - 2*margin) / dx;
-  const sy = (h - 2*margin) / dy;
-  cam.scale = Math.max(5, Math.min(800, Math.min(sx, sy)));
-  const cx = (b.minx + b.maxx) * 0.5;
-  const cy = (b.miny + b.maxy) * 0.5;
-  cam.offsetX = w/2 - cx*cam.scale;
-  cam.offsetY = h/2 + cy*cam.scale;
+  const margin = 40; // px
+  const innerW = Math.max(10, w - 2*margin);
+  const innerH = Math.max(10, h - 2*margin);
+
+  // Use camera-space bounds so fit works under rotation
+  const cb = boundsToCameraAABB(b);
+
+  const dx = Math.max(1e-6, cb.maxx - cb.minx);
+  const dy = Math.max(1e-6, cb.maxy - cb.miny);
+
+  const sx = innerW / dx;
+  const sy = innerH / dy;
+
+  let newScale;
+  if (mode === 'contain'){
+    newScale = Math.min(sx, sy);
+  } else if (mode === 'cover'){
+    newScale = Math.max(sx, sy);
+  } else { // 'fitWidth'
+    // Fill width; allow height overflow/crop if needed
+    newScale = sx;
+    // Optional safeguard
+    newScale = Math.max(newScale, Math.min(sx, sy) * 0.8);
+  }
+
+  cam.scale = Math.max(5, Math.min(2000, newScale));
+
+  // Center in camera coords
+  const cx = (cb.minx + cb.maxx) * 0.5;
+  const cy = (cb.miny + cb.maxy) * 0.5;
+
+  // screen mapping:
+  // sx = offsetX + rx*scale
+  // sy = offsetY - ry*scale
+  cam.offsetX = w/2 - cx * cam.scale;
+  cam.offsetY = h/2 + cy * cam.scale;
 }
 
 function drawMap(){
@@ -746,9 +855,6 @@ function drawMap(){
     mapCache._img_h = h;
   }
 
-  // compute screen rect of map bounds
-  // NOTE: with rotation, the map is no longer screen-axis-aligned.
-  // We draw it using canvas transforms consistent with worldToScreen().
   ctx.save();
   ctx.imageSmoothingEnabled = false;
 
@@ -802,7 +908,7 @@ function drawTrajectory(){
   // pose 点：从半径 3 缩小到 2
   ctx.fillStyle = '#007aff';
   const step = Math.max(1, Math.floor(trajPts.length/300));
-  const r = 2; 
+  const r = 2;
 
   for (let i=0;i<trajPts.length;i+=step){
     ctx.beginPath();
@@ -994,6 +1100,11 @@ function drawMeasureOverlay(){
 
 function render(frame){
   if (!frame || frame.error) return;
+
+  // Keep canvas pixel size in sync with layout.
+  // This prevents "fit looks wrong" and mouse coordinate drift on resize.
+  resizeCanvasToDisplaySize(true);
+
   clear();
 
   // V3: RViz-like helpers (grid/axes/scale) anchored in world frame.
@@ -1292,7 +1403,7 @@ canvas.addEventListener('wheel', (e)=>{
 canvas.addEventListener('dblclick', ()=>{
   // double click -> fit based on map if present, else traj/pose
   const b = computeBoundsFromMap() || computeBoundsFromTrajOrPose(lastFrame);
-  fitCameraToBounds(b);
+  fitCameraToBounds(b, 'fitWidth');
   if (lastFrame) render(lastFrame);
 });
 
@@ -1362,15 +1473,15 @@ for (const c of [ckMap, ckCloud, ckTraj, ckRobot, ckGrid, ckAxes, ckScale]){
 }
 btnFit?.addEventListener('click', ()=>{
   const b = computeBoundsFromMap() || computeBoundsFromTrajOrPose(lastFrame);
-  fitCameraToBounds(b);
+  fitCameraToBounds(b, 'fitWidth');
   if (lastFrame) render(lastFrame);
 });
 btnFitMap?.addEventListener('click', ()=>{
-  fitCameraToBounds(computeBoundsFromMap());
+  fitCameraToBounds(computeBoundsFromMap(), 'contain'); // 看全图（允许留黑边）
   if (lastFrame) render(lastFrame);
 });
 btnFitTraj?.addEventListener('click', ()=>{
-  fitCameraToBounds(computeBoundsFromTrajOrPose(lastFrame));
+  fitCameraToBounds(computeBoundsFromTrajOrPose(lastFrame), 'fitWidth');
   if (lastFrame) render(lastFrame);
 });
 btnResetView?.addEventListener('click', ()=>{
@@ -1422,12 +1533,15 @@ function loop(){
   speed = parseFloat(selSpeed.value);
   speedLabelEl.textContent = `x${speed}`;
 
+  // Ensure canvas pixels match its CSS size (important before any fit/offset logic)
+  initCanvasResizeObserver();
+
   // initial
   const sec = 0;
   updateTimeline(sec);
   txtTimeEl.textContent = nsToTimeText(tsFromSec(sec));
 
-  // initialize camera center
+  // initialize camera center (after resize sync)
   cam.scale = 80.0;
   cam.offsetX = canvas.width/2;
   cam.offsetY = canvas.height/2;
@@ -1439,12 +1553,7 @@ function loop(){
 
   // Auto-fit once on load (prefer map, else traj/pose)
   const b0 = computeBoundsFromMap() || computeBoundsFromTrajOrPose(lastFrame);
-  fitCameraToBounds(b0);
-  if (lastFrame) render(lastFrame);
-
-  // first-time fit based on map (preferred) or traj/pose
-  const b = computeBoundsFromMap() || computeBoundsFromTrajOrPose(lastFrame);
-  fitCameraToBounds(b);
+  fitCameraToBounds(b0, 'fitWidth');
   if (lastFrame) render(lastFrame);
 
   // init measure label state
