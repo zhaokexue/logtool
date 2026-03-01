@@ -14,6 +14,7 @@ const slipEl = el('slip_txt');
 const txtTimeEl = el('txtTime');
 const txtStateEl = el('txtState');
 const speedLabelEl = el('speedLabel');
+const infoHintEl = el('infoHint');
 
 // extra status text fields in top toolbar (optional)
 const txtExceptionEl = el('txtException');
@@ -151,15 +152,39 @@ const measure = {
   dist_m: 0,
 };
 
-function setMeasureLabel(txt){}
+function setMeasureLabel(txt){
+  if (!infoHintEl) return;
+  if (txt && String(txt).trim()) {
+    infoHintEl.textContent = `测距模式：${txt}`;
+  } else {
+    infoHintEl.textContent = '实时状态';
+  }
+}
 
 function clearMeasure(keepEnabled=true){
   measure.a = null;
   measure.b = null;
   measure.dist_m = 0;
+  measure.enabled = !!keepEnabled;
+  updateMeasureDistanceLabel();
+  if (btnMeasure) btnMeasure.textContent = measure.enabled ? '退出测量' : '测量';
 }
 
-function updateMeasureDistanceLabel(){}
+function updateMeasureDistanceLabel(){
+  if (!measure.enabled) {
+    setMeasureLabel('');
+    return;
+  }
+  if (!measure.a) {
+    setMeasureLabel('请选择点A...');
+    return;
+  }
+  if (!measure.b) {
+    setMeasureLabel('请选择点B...');
+    return;
+  }
+  setMeasureLabel(`距离 ${measure.dist_m.toFixed(3)} m（右键清除，ESC退出）`);
+}
 
 // Trajectory-from-backend (prefix) for correct seek/drag rendering.
 let trajReq = { ac:null, lastMs:0 };
@@ -1192,13 +1217,7 @@ selSpeed.addEventListener('change', ()=>{
 // ---------------------- Measure button logic ----------------------
 if (btnMeasure){
   btnMeasure.addEventListener('click', ()=>{
-    measure.enabled = !measure.enabled;
-    // reset points on toggle to avoid stale overlay
-    measure.a = null;
-    measure.b = null;
-    measure.dist_m = 0;
-    if (measure.enabled) setMeasureLabel('请选择点A...');
-    else setMeasureLabel('');
+    clearMeasure(!measure.enabled);
     if (lastFrame) render(lastFrame);
   });
 }
@@ -1455,7 +1474,6 @@ canvas.addEventListener('contextmenu', (e)=>{
 window.addEventListener('keydown', (e)=>{
   if (e.key === 'Escape'){
     if (!measure.enabled && !measure.a && !measure.b) return;
-    measure.enabled = false;
     clearMeasure(false);
     if (lastFrame) render(lastFrame);
   }
